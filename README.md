@@ -9,6 +9,36 @@ Personal finance app that fetches Norwegian bank transactions via [Enable Bankin
 - A sandbox (or production) app registered at [enablebanking.com](https://enablebanking.com)
 - The private key `.pem` file downloaded when registering the app, placed in the project root
 
+## Configure Enable Banking
+1. Register a user at [enablebanking.com](https://enablebanking.com).
+2. Click on your profile name and select API applications.
+3. Add a new sandbox application.
+   - Select Generate a private RSA key in browser.
+   - Enter an application name.
+   - Allowed redirect URLs:
+     - http://localhost:8000/callback
+     - https://localhost:8000/callback
+   - Download the `.pem` file and store it in the root directory of the repo.
+   - The application ID is the first part of the `.pem` file name.
+
+### Setup a self signed certificate for https
+
+1. Install mkcert:
+
+```shell
+winget install FiloSottile.mkcert      # On Windows
+sudo apt install mkcert libnss3-tools  # On Linux
+```
+
+2. Create a self-signed certificate:
+
+```shell
+mkcert -install
+mkcert localhost 127.0.0.1 ::1
+```
+
+This produces `localhost+2.pem` (certificate) and `localhost+2-key.pem` (private key).
+
 ## Setup
 
 ```bash
@@ -23,10 +53,10 @@ Override any setting via a `.env` file in the project root or environment variab
 
 | Variable         | Default                                    | Description                              |
 |------------------|--------------------------------------------|------------------------------------------|
-| `APP_ID`         | `1ac8f792-e6bf-4a66-8512-244359e69fcf`     | Enable Banking application ID            |
-| `PEM_FILE`       | `1ac8f792-e6bf-4a66-8512-244359e69fcf.pem` | Path to the RSA private key              |
-| `REDIRECT_URL`   | `http://localhost:8000/callback`            | OAuth callback URL (must be whitelisted) |
-| `API_ORIGIN`     | `https://api.enablebanking.com`             | Enable Banking API base URL              |
+| `APP_ID`         | `9a83a4b1-eb9f-4b87-8314-fe1e2d6746b1`     | Enable Banking application ID            |
+| `PEM_FILE`       | `9a83a4b1-eb9f-4b87-8314-fe1e2d6746b1.pem` | Path to the RSA private key              |
+| `REDIRECT_URL`   | `https://localhost:8000/callback`          | OAuth callback URL (must be whitelisted) |
+| `API_ORIGIN`     | `https://api.enablebanking.com`            | Enable Banking API base URL              |
 | `ASPSP_NAME`     | `Sbanken`                                  | Default bank name                        |
 | `ASPSP_COUNTRY`  | `NO`                                       | Default bank country (ISO 3166)          |
 

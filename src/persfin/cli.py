@@ -52,7 +52,9 @@ def _prompt_bank_selection(country: str = "NO") -> tuple[str, str]:
 
 def _start_server_thread() -> None:
     """Run uvicorn in a daemon thread so it stops when the process exits."""
-    config = uvicorn.Config(app, host="127.0.0.1", port=8000, log_level="warning")
+    config = uvicorn.Config(app, host="127.0.0.1", port=8000, log_level="warning",
+                            ssl_certfile="localhost+2.pem",
+                            ssl_keyfile="localhost+2-key.pem")
     server = uvicorn.Server(config)
     thread = threading.Thread(target=server.run, daemon=True)
     thread.start()
@@ -100,32 +102,36 @@ def _print_session_summary() -> None:
             bal_resp = enablebanking.get_balances(account_uid=uid)
             for b in bal_resp.balances:
                 label = b.balance_type or b.name or "balance"
-                print(f"   {label:<30} {b.balance_amount.amount} {b.balance_amount.currency}")
+                print(
+                    f"   {label:<30} {b.balance_amount.amount} {b.balance_amount.currency}")
         except Exception as exc:  # noqa: BLE001
             print(f"   (Could not fetch balances: {exc})")
 
         # Transactions
         try:
-            txn_resp = enablebanking.get_transactions(account_uid=uid, date_from=date_from)
+            txn_resp = enablebanking.get_transactions(account_uid=uid,
+                                                      date_from=date_from)
             txns = txn_resp.transactions
             print(f"\n   Transactions since {date_from} ({len(txns)} total):")
             if txns:
                 print(f"   {'Date':<12} {'Amount':>12} {'Currency':<6}  Description")
-                print(f"   {'-'*12} {'-'*12} {'-'*6}  {'-'*30}")
+                print(f"   {'-' * 12} {'-' * 12} {'-' * 6}  {'-' * 30}")
                 for t in txns[:20]:
                     date = t.booking_date or t.value_date or "???"
                     amt = t.transaction_amount.amount
                     ccy = t.transaction_amount.currency
                     desc = (
-                        (t.remittance_information[0] if t.remittance_information else None)
-                        or t.creditor_name
-                        or t.debtor_name
-                        or t.additional_information
-                        or ""
+                            (t.remittance_information[
+                                 0] if t.remittance_information else None)
+                            or t.creditor_name
+                            or t.debtor_name
+                            or t.additional_information
+                            or ""
                     )
                     print(f"   {date:<12} {amt:>12} {ccy:<6}  {desc[:50]}")
                 if len(txns) > 20:
-                    print(f"   … and {len(txns) - 20} more. Use the API for the full list.")
+                    print(
+                        f"   … and {len(txns) - 20} more. Use the API for the full list.")
             else:
                 print("   (no transactions found in this period)")
         except Exception as exc:  # noqa: BLE001
@@ -145,14 +151,16 @@ def main() -> None:
     _start_server_thread()
 
     # 3. Get the OAuth URL and open it
-    auth_url = enablebanking.start_auth(aspsp_name=aspsp_name, aspsp_country=aspsp_country)
+    auth_url = enablebanking.start_auth(aspsp_name=aspsp_name,
+                                        aspsp_country=aspsp_country)
     print("\nOpening browser for bank login...")
     print(f"  URL: {auth_url}")
     print()
     if aspsp_name == "Mock ASPSP":
         print("NOTE: Mock ASPSP requires you to be logged into enablebanking.com.")
         print("      1. Make sure you are signed in at https://enablebanking.com")
-        print("      2. If you see 'No Account', click 'Create Account' to set up test data")
+        print(
+            "      2. If you see 'No Account', click 'Create Account' to set up test data")
         print("      3. After creating an account, proceed through the consent flow")
         print()
     print("Waiting up to 10 minutes for you to complete the login...")
