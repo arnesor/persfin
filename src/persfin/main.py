@@ -15,8 +15,9 @@ Typical flow:
 
 import logging
 from datetime import datetime, timedelta, timezone
+from typing import Annotated
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import Depends, FastAPI, HTTPException, Query
 from fastapi.responses import HTMLResponse
 
 from persfin import enablebanking
@@ -43,8 +44,11 @@ _session: SessionResponse | None = None
 # ── Banks ────────────────────────────────────────────────────────────────────
 
 
-@app.get("/banks", response_model=AspspsResponse, tags=["banks"])
-def list_banks(country: str = Query(default="NO", description="ISO 3166 two-letter country code")) -> AspspsResponse:
+CountryQuery = Annotated[str, Query(default="NO", description="ISO 3166 two-letter country code")]
+
+
+@app.get("/banks", tags=["banks"], responses={502: {"description": "Upstream Enable Banking API error"}})
+def list_banks(country: CountryQuery) -> AspspsResponse:
     """Return the list of supported banks / ASPSPs for a given country."""
     try:
         return enablebanking.get_aspsps(country=country)
@@ -56,7 +60,7 @@ def list_banks(country: str = Query(default="NO", description="ISO 3166 two-lett
 # ── Auth flow ────────────────────────────────────────────────────────────────
 
 
-@app.post("/connect", tags=["auth"])
+@app.post("/connect", tags=["auth"], responses={502: {"description": "Upstream Enable Banking API error"}})
 def connect(body: AuthRequest) -> dict[str, str]:
     """
     Start the authorisation flow for a bank.
@@ -75,8 +79,11 @@ def connect(body: AuthRequest) -> dict[str, str]:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
 
-@app.get("/callback", tags=["auth"])
-def callback(code: str = Query(..., description="Authorisation code returned by the bank")) -> HTMLResponse:
+AuthCode = Annotated[str, Query(..., description="Authorisation code returned by the bank")]
+
+
+@app.get("/callback", tags=["auth"], responses={502: {"description": "Upstream Enable Banking API error"}})
+def callback(code: AuthCode) -> HTMLResponse:
     """
     OAuth redirect target. The bank redirects here after the user logs in.
     Exchanges the `code` for a session and stores it in memory.
@@ -112,16 +119,18 @@ def _require_session() -> SessionResponse:
     return _session
 
 
-@app.get("/accounts", response_model=SessionResponse, tags=["accounts"])
-def get_accounts() -> SessionResponse:
+ActiveSession = Annotated[SessionResponse, Depends(_require_session)]
+
+
+@app.get("/accounts", tags=["accounts"], responses={401: {"description": "No active session"}})
+def get_accounts(session: ActiveSession) -> SessionResponse:
     """Return the accounts from the active session."""
-    return _require_session()
+    return session
 
 
-@app.get("/accounts/{account_uid}/balances", response_model=BalancesResponse, tags=["accounts"])
-def account_balances(account_uid: str) -> BalancesResponse:
+@app.get("/accounts/{account_uid}/balances", tags=["accounts"], responses={401: {"description": "No active session"}, 502: {"description": "Upstream Enable Banking API error"}})
+def account_balances(account_uid: str, _session: ActiveSession) -> BalancesResponse:
     """Return balances for the given account UID."""
-    _require_session()
     try:
         return enablebanking.get_balances(account_uid=account_uid)
     except Exception as exc:
@@ -129,17 +138,18 @@ def account_balances(account_uid: str) -> BalancesResponse:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
 
-@app.get("/accounts/{account_uid}/transactions", response_model=TransactionsResponse, tags=["accounts"])
+DateFromQuery = Annotated[str | None, Query(default=None, description="Fetch transactions from this date (YYYY-MM-DD). Defaults to 90 days ago.")]
+ContinuationKeyQuery = Annotated[str | None, Query(default=None, description="Pagination key from a previous response")]
+
+
+@app.get("/accounts/{account_uid}/transactions", tags=["accounts"], responses={401: {"description": "No active session"}, 502: {"description": "Upstream Enable Banking API error"}})
 def account_transactions(
     account_uid: str,
-    date_from: str | None = Query(
-        default=None,
-        description="Fetch transactions from this date (YYYY-MM-DD). Defaults to 90 days ago.",
-    ),
-    continuation_key: str | None = Query(default=None, description="Pagination key from a previous response"),
+    _session: ActiveSession,
+    date_from: DateFromQuery = None,
+    continuation_key: ContinuationKeyQuery = None,
 ) -> TransactionsResponse:
     """Return transactions for the given account UID."""
-    _require_session()
     if date_from is None:
         date_from = (datetime.now(timezone.utc) - timedelta(days=90)).date().isoformat()
     try:
