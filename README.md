@@ -54,8 +54,8 @@ Override any setting via a `.env` file in the project root or environment variab
 
 | Variable         | Default                                    | Description                              |
 |------------------|--------------------------------------------|------------------------------------------|
-| `APP_ID`         | `9a83a4b1-eb9f-4b87-8314-fe1e2d6746b1`     | Enable Banking application ID            |
-| `PEM_FILE`       | `9a83a4b1-eb9f-4b87-8314-fe1e2d6746b1.pem` | Path to the RSA private key              |
+| `APP_ID`         | `967a2989-7e4f-453c-b9eb-08c19a9f64c5`     | Enable Banking application ID            |
+| `PEM_FILE`       | `967a2989-7e4f-453c-b9eb-08c19a9f64c5.pem` | Path to the RSA private key              |
 | `REDIRECT_URL`   | `https://localhost:8000/callback`          | OAuth callback URL (must be whitelisted) |
 | `API_ORIGIN`     | `https://api.enablebanking.com`            | Enable Banking API base URL              |
 | `ASPSP_NAME`     | `Sbanken`                                  | Default bank name                        |
