@@ -44,11 +44,11 @@ _sessions: dict[str, SessionResponse] = {}
 # ── Banks ────────────────────────────────────────────────────────────────────
 
 
-CountryQuery = Annotated[str, Query(default="NO", description="ISO 3166 two-letter country code")]
+CountryQuery = Annotated[str, Query(description="ISO 3166 two-letter country code")]
 
 
 @app.get("/banks", tags=["banks"], responses={502: {"description": "Upstream Enable Banking API error"}})
-def list_banks(country: CountryQuery) -> AspspsResponse:
+def list_banks(country: CountryQuery = "NO") -> AspspsResponse:
     """Return the list of supported banks / ASPSPs for a given country."""
     try:
         return enablebanking.get_aspsps(country=country)
@@ -141,8 +141,8 @@ def account_balances(account_uid: str, _session: ActiveSession) -> BalancesRespo
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
 
-DateFromQuery = Annotated[str | None, Query(default=None, description="Fetch transactions from this date (YYYY-MM-DD). Defaults to 90 days ago.")]
-ContinuationKeyQuery = Annotated[str | None, Query(default=None, description="Pagination key from a previous response")]
+DateFromQuery = Annotated[str | None, Query(description="Fetch transactions from this date (YYYY-MM-DD). Defaults to 90 days ago.")]
+ContinuationKeyQuery = Annotated[str | None, Query(description="Pagination key from a previous response")]
 
 
 @app.get("/accounts/{account_uid}/transactions", tags=["accounts"], responses={401: {"description": "No active session"}, 502: {"description": "Upstream Enable Banking API error"}})

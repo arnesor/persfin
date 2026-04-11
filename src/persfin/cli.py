@@ -72,7 +72,7 @@ def _wait_for_session(timeout: int = 120) -> None:
     deadline = time.monotonic() + timeout
     print("\nWaiting for you to complete the bank login in your browser…", flush=True)
     while time.monotonic() < deadline:
-        if _persfin_main._session is not None:
+        if _persfin_main._sessions:
             return
         time.sleep(0.5)
     raise SystemExit("Timed out waiting for bank callback. Please try again.")
@@ -82,10 +82,10 @@ def _print_session_summary() -> None:
     """Print account balances and recent transactions for all accounts."""
     import persfin.main as _persfin_main
 
-    session = _persfin_main._session
-    if session is None:
+    if not _persfin_main._sessions:
         print("No session available.")
         return
+    session = next(iter(_persfin_main._sessions.values()))
 
     date_from = (datetime.now(timezone.utc) - timedelta(days=90)).date().isoformat()
     print(f"\n{'=' * 60}")
