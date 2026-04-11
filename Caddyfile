@@ -1,0 +1,9 @@
+firefly.localhost {
+    tls /certs/localhost+2.pem /certs/localhost+2-key.pem
+    reverse_proxy app:8080
+}
+
+importer.localhost {
+    tls /certs/localhost+2.pem /certs/localhost+2-key.pem
+    reverse_proxy importer:8080
+}

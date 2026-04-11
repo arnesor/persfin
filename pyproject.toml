@@ -1,0 +1,34 @@
+[project]
+name = "persfin"
+version = "0.1.0"
+description = "Personal finance app that fetches Norwegian bank transactions via Enable Banking."
+readme = "README.md"
+authors = [
+    { name = "Arne Sørli", email = "arnesor@users.noreply.github.com" }
+]
+requires-python = ">=3.13"
+dependencies = [
+    "cryptography>=45.0.0",
+    "fastapi>=0.135.3",
+    "httpx>=0.28.1",
+    "pydantic>=2.12.5",
+    "pydantic-settings>=2.9.1",
+    "pyjwt[crypto]>=2.12.1",
+    "python-dotenv>=1.2.2",
+    "uvicorn>=0.44.0",
+]
+
+[project.scripts]
+persfin = "persfin:run_server"
+persfin-cli = "persfin.cli:main"
+
+[build-system]
+requires = ["uv_build>=0.11.3,<0.12.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "mypy>=1.20.0",
+    "pytest>=9.0.3",
+    "ruff>=0.15.10",
+]
