@@ -17,7 +17,7 @@ import logging
 from datetime import datetime, timedelta, timezone
 from typing import Annotated
 
-from fastapi import Depends, FastAPI, HTTPException, Query
+from fastapi import Cookie, Depends, FastAPI, HTTPException, Query, Response
 from fastapi.responses import HTMLResponse
 
 from persfin import enablebanking
@@ -37,8 +37,8 @@ app = FastAPI(
     version="0.1.0",
 )
 
-# In-memory store for the active session (single-user local app)
-_session: SessionResponse | None = None
+# In-memory store for sessions, keyed by session ID (supports multiple concurrent sessions)
+_sessions: dict[str, SessionResponse] = {}
 
 
 # ── Banks ────────────────────────────────────────────────────────────────────
@@ -83,25 +83,28 @@ AuthCode = Annotated[str, Query(..., description="Authorisation code returned by
 
 
 @app.get("/callback", tags=["auth"], responses={502: {"description": "Upstream Enable Banking API error"}})
-def callback(code: AuthCode) -> HTMLResponse:
+def callback(code: AuthCode, response: Response) -> HTMLResponse:
     """
     OAuth redirect target. The bank redirects here after the user logs in.
-    Exchanges the `code` for a session and stores it in memory.
+    Exchanges the `code` for a session, stores it keyed by session ID,
+    and sets a `session_id` cookie in the browser.
     """
-    global _session
     try:
-        _session = enablebanking.create_session(code=code)
-        logger.info("Session created: %s (%d accounts)", _session.session_id, len(_session.accounts))
-        account_list = "".join(f"<li><code>{a.uid}</code></li>" for a in _session.accounts)
+        session = enablebanking.create_session(code=code)
+        _sessions[session.session_id] = session
+        logger.info("Session created: %s (%d accounts)", session.session_id, len(session.accounts))
+        account_list = "".join(f"<li><code>{a.uid}</code></li>" for a in session.accounts)
         html = f"""
         <html><body>
         <h2>✅ Connected!</h2>
-        <p>Session ID: <code>{_session.session_id}</code></p>
+        <p>Session ID: <code>{session.session_id}</code></p>
         <p>Accounts:</p><ul>{account_list}</ul>
         <p><a href="/accounts">View accounts JSON</a></p>
         </body></html>
         """
-        return HTMLResponse(content=html)
+        html_response = HTMLResponse(content=html)
+        html_response.set_cookie(key="session_id", value=session.session_id, httponly=True, samesite="lax")
+        return html_response
     except Exception as exc:
         logger.error("Callback failed: %s", exc)
         raise HTTPException(status_code=502, detail=str(exc)) from exc
@@ -110,13 +113,13 @@ def callback(code: AuthCode) -> HTMLResponse:
 # ── Account data ─────────────────────────────────────────────────────────────
 
 
-def _require_session() -> SessionResponse:
-    if _session is None:
+def _require_session(session_id: str | None = Cookie(default=None)) -> SessionResponse:
+    if session_id is None or session_id not in _sessions:
         raise HTTPException(
             status_code=401,
             detail="No active session. Visit /connect first to authenticate with your bank.",
         )
-    return _session
+    return _sessions[session_id]
 
 
 ActiveSession = Annotated[SessionResponse, Depends(_require_session)]
