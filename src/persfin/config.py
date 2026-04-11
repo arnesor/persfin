@@ -2,12 +2,13 @@ from pathlib import Path
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+SANDBOX_APP_ID = "967a2989-7e4f-453c-b9eb-08c19a9f64c5"
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
-    app_id: str = "967a2989-7e4f-453c-b9eb-08c19a9f64c5"
-    pem_file: Path = Path("967a2989-7e4f-453c-b9eb-08c19a9f64c5.pem")
+    app_id: str = SANDBOX_APP_ID
+    pem_file: Path = Path(f"{SANDBOX_APP_ID}.pem")
     redirect_url: str = "https://localhost:8000/callback"
     api_origin: str = "https://api.enablebanking.com"
 
