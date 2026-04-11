@@ -1,7 +1,7 @@
 [project]
 name = "persfin"
 version = "0.1.0"
-description = "Add your description here"
+description = "Personal finance app that fetches Norwegian bank transactions via Enable Banking."
 readme = "README.md"
 authors = [
     { name = "Arne Sørli", email = "arnesor@users.noreply.github.com" }
