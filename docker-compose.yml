@@ -17,8 +17,8 @@ services:
     volumes:
       - firefly_iii_upload:/var/www/html/storage/upload
     env_file: .env
-    ports:
-      - '80:8080'
+    environment:
+      - TRUSTED_PROXIES=*
     depends_on:
       - db
   db:
@@ -45,11 +45,29 @@ services:
 #
 #    volumes:
 #      - /your-path-here/to/import:/import
-    ports:
-      - '81:8080'
+    env_file: .importer.env
+    environment:
+      - TRUSTED_PROXIES=*
     depends_on:
       - app
-    env_file: .importer.env
+
+  caddy:
+    image: caddy:latest
+    container_name: firefly_iii_caddy
+    restart: always
+    ports:
+      - "80:80"
+      - "443:443"
+    networks:
+      - firefly_iii
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile
+      - ./certs:/certs
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - app
+      - importer
 
   cron:
     #
@@ -71,8 +89,10 @@ services:
     depends_on:
       - app
 volumes:
-   firefly_iii_upload:
-   firefly_iii_db:
+  firefly_iii_upload:
+  firefly_iii_db:
+  caddy_data:
+  caddy_config:
 
 networks:
   firefly_iii:

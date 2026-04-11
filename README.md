@@ -18,6 +18,7 @@ Personal finance app that fetches Norwegian bank transactions via [Enable Bankin
    - Allowed redirect URLs:
      - http://localhost:8000/callback
      - https://localhost:8000/callback
+     - https://importer.localhost/eb-callback
    - Download the `.pem` file and store it in the root directory of the repo.
    - The application ID is the first part of the `.pem` file name.
 
@@ -34,7 +35,7 @@ sudo apt install mkcert libnss3-tools  # On Linux
 
 ```shell
 mkcert -install
-mkcert localhost 127.0.0.1 ::1
+mkcert localhost importer.localhost firefly.localhost
 ```
 
 This produces `localhost+2.pem` (certificate) and `localhost+2-key.pem` (private key).
@@ -195,4 +196,12 @@ uv run mypy src/
 
 # Tests
 uv run pytest
+```
+
+## Firefly III integration
+
+```shell
+docker compose -f docker-compose.yml up -d --pull=always
+docker compose -f docker-compose.yml logs -f
+docker compose -f docker-compose.yml down
 ```
