@@ -1,19 +1,27 @@
 # persfin
 
-Personal finance app that fetches Norwegian bank transactions via [Enable Banking](https://enablebanking.com).
+Personal finance code that fetches European bank transactions via [Enable Banking].
+
+It also includes a [Firefly III] Docker setup and integration for importing
+transactions into Firefly III, using Enable Banking.
 
 ## Requirements
 
 - Python 3.13+
-- [uv](https://docs.astral.sh/uv/) package manager
-- A sandbox (or production) app registered at [enablebanking.com](https://enablebanking.com)
-- The private key `.pem` file downloaded when registering the app, placed in the project root
+- [uv] package manager.
+- A sandbox or production app registered at [Enable Banking].
+- The private key `.pem` file downloaded when registering the Enable Banking app, placed in the project root.
+- A self-signed certificate for https.
 
 ## Configure Enable Banking
-1. Register a user at [enablebanking.com](https://enablebanking.com).
+
+1. Register a user at [Enable Banking].
 2. Click on your profile name and select API applications.
-3. Add a new sandbox application.
-   - Select Generate a private RSA key in browser.
+
+### Sandbox app
+
+- Add a new sandbox application.
+   - Select Generate a private RSA key in the browser.
    - Enter an application name.
    - Allowed redirect URLs:
      - http://localhost:8000/callback
@@ -22,56 +30,64 @@ Personal finance app that fetches Norwegian bank transactions via [Enable Bankin
    - Download the `.pem` file and store it in the root directory of the repo.
    - The application ID is the first part of the `.pem` file name.
 
-### Setup a self signed certificate for https
+### Production app
+
+1. Add a new production application.
+   - Select Generate a private RSA key in the browser.
+   - Enter an application name.
+   - Allowed redirect URLs:
+      - https://localhost:8000/callback
+      - https://importer.localhost/eb-callback
+   - Application description: App for getting personal transactions
+   - Email for data protection matters: Your email address
+   - Privacy URL: https://arnesor.github.io/persfin/privacy
+   - Terms URL: https://arnesor.github.io/persfin/terms
+   - Download the `.pem` file and store it in the root directory of the repo.
+   - The application ID is the first part of the `.pem` file name.
+2. Link accounts
+   - For each bank account you want to access:
+      - Click on the Link accounts button.
+      - Select country and bank name. Set usage type to Personal.
+      - Click on the Link button.
+
+## Setup a self signed certificate for https
 
 1. Install mkcert:
 
+| Platform | Command                              |
+|---|---------------------------------------------|
+| Windows | `winget install FiloSottile.mkcert`   |
+| Linux | `sudo apt install mkcert libnss3-tools` |
+| macOS | `brew install mkcert`                   |
+
+And then: 
+
 ```shell
-winget install FiloSottile.mkcert      # On Windows
-sudo apt install mkcert libnss3-tools  # On Linux
+mkcert -install
 ```
 
 2. Create a self-signed certificate:
 
+Run this from the `firefly/certs/` directory:
+
 ```shell
-mkcert -install
 mkcert localhost importer.localhost firefly.localhost
 ```
 
 This produces `localhost+2.pem` (certificate) and `localhost+2-key.pem` (private key).
 
-## Setup
-
-```bash
-# Install dependencies
-uv sync
-```
-
-### Configuration
-
-The app ships with sensible defaults for the sandbox.  
-Override any setting via a `.env` file in the project root or environment variables:
-
-| Variable         | Default                                    | Description                              |
-|------------------|--------------------------------------------|------------------------------------------|
-| `APP_ID`         | `967a2989-7e4f-453c-b9eb-08c19a9f64c5`     | Enable Banking application ID            |
-| `PEM_FILE`       | `967a2989-7e4f-453c-b9eb-08c19a9f64c5.pem` | Path to the RSA private key              |
-| `REDIRECT_URL`   | `https://localhost:8000/callback`          | OAuth callback URL (must be whitelisted) |
-| `API_ORIGIN`     | `https://api.enablebanking.com`            | Enable Banking API base URL              |
-| `ASPSP_NAME`     | `Sbanken`                                  | Default bank name                        |
-| `ASPSP_COUNTRY`  | `NO`                                       | Default bank country (ISO 3166)          |
-
-Example `.env`:
-```dotenv
-ASPSP_NAME=Sbanken
-ASPSP_COUNTRY=NO
-```
-
 ## Quick start – interactive CLI
 
 The easiest way to use persfin is the interactive CLI.
 It lists all Norwegian banks, lets you pick one, opens the bank login in your
-browser, and then prints your balances and recent transactions.
+browser, and then prints your balances and recent transactions and stores to csv file.
+
+### Configure
+1. Copy `.env.example` in the root directory to `.env`.
+2. Open the `.env` file, and set the Enable Banking application ID 
+   and `.pem`-file to the one you downloaded from Enable Banking. 
+
+### Run
 
 ```bash
 uv run persfin-cli
@@ -110,8 +126,6 @@ Waiting for you to complete the bank login in your browser…
    closingBooked                    12345.67 NOK
    …
 ```
-
-The bank sandbox login credentials are typically `customera / 12345678`.
 
 ## Running the REST API server
 
@@ -164,13 +178,13 @@ curl http://localhost:8000/accounts/<account_uid>/balances
 
 ```bash
 # Last 90 days (default)
-curl http://localhost:8000/accounts/<account_uid>/transactions
+curl https://localhost:8000/accounts/<account_uid>/transactions
 
 # From a specific date
-curl "http://localhost:8000/accounts/<account_uid>/transactions?date_from=2024-01-01"
+curl "https://localhost:8000/accounts/<account_uid>/transactions?date_from=2024-01-01"
 
 # Next page (pagination)
-curl "http://localhost:8000/accounts/<account_uid>/transactions?continuation_key=<key>"
+curl "https://localhost:8000/accounts/<account_uid>/transactions?continuation_key=<key>"
 ```
 
 ## Project structure
@@ -200,8 +214,45 @@ uv run pytest
 
 ## Firefly III integration
 
+Requirement: A working docker installation.
+
+### Configuration
+
+Go to the `firefly` directory and copy all `.example` files to the same
+filename, without the `.example` extension.
+
+Edit the following variables in the files:
+
+`.db.env`: Change the MYSQL_PASSWORD to your own password.
+
+`.env`: Change the DB_PASSWORD to the same as the MYSQL_PASSWORD.
+
+`.importer.env`: Set FIREFLY_III_ACCESS_TOKEN to the personal access token
+generated by following
+[this description](https://docs.firefly-iii.org/how-to/firefly-iii/features/api/).
+
+Start the containers, in the firefly directory:
+
 ```shell
 docker compose -f docker-compose.yml up -d --pull=always
+```
+
+Open the Firefly III web interface at https://firefly.localhost/
+
+Open the Data Importer web interface at https://importer.localhost/
+
+Showing logs:
+
+```shell
 docker compose -f docker-compose.yml logs -f
+````
+Shutting down the containers:
+
+```shell
 docker compose -f docker-compose.yml down
 ```
+
+[Enable Banking]: https://www.enablebanking.com
+[Firefly III]: https://www.firefly-iii.org/
+[mkcert]: https://github.com/FiloSottile/mkcert
+[uv]: https://docs.astral.sh/uv/

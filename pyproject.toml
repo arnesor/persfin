@@ -11,6 +11,7 @@ dependencies = [
     "cryptography>=45.0.0",
     "fastapi>=0.135.3",
     "httpx>=0.28.1",
+    "polars>=1.39.3",
     "pydantic>=2.12.5",
     "pydantic-settings>=2.9.1",
     "pyjwt[crypto]>=2.12.1",
@@ -18,17 +19,91 @@ dependencies = [
     "uvicorn>=0.44.0",
 ]
 
-[project.scripts]
-persfin = "persfin:run_server"
-persfin-cli = "persfin.cli:main"
-
-[build-system]
-requires = ["uv_build>=0.11.3,<0.12.0"]
-build-backend = "uv_build"
-
 [dependency-groups]
 dev = [
     "mypy>=1.20.0",
     "pytest>=9.0.3",
     "ruff>=0.15.10",
 ]
+
+[project.scripts]
+persfin = "persfin.main:main"
+persfin-cli = "persfin.cli:main"
+
+[tool.ruff]
+force-exclude = true  # Apply excludes to pre-commit
+show-fixes = true
+src = ["src", "tests"]
+target-version = "py313"  # Minimum Python version supported
+
+[tool.ruff.format]
+line-ending = "lf"
+
+# Ruff rules may be customized as desired: https://docs.astral.sh/ruff/rules/
+[tool.ruff.lint]
+select = [
+    "A",    # prevent using keywords that clobber python builtins
+    "ANN",  # check type annotations
+    "B",    # bugbear: security warnings
+    "D",    # documentation
+    "E",    # pycodestyle
+    "F",    # pyflakes
+    "ISC",  # implicit string concatenation
+    "I",    # sort imports
+    "UP",   # alert you when better syntax is available in your python version
+    "RUF",  # the ruff developer's own rules
+]
+ignore = [
+    "ANN202", # Don't require return type annotation for private functions.
+    "ANN401", # Allow type annotation with type Any.
+    "D100",   # Supress undocumented-public-module. Only doc of public api required.
+    "D101",   # Supress undocumented-public-class for generated code.
+    "E741",   # Supress ambiguous variable name for generated code.
+    "FBT001", # Allow boolean positional arguments in a function.
+    "FBT002", # Allow boolean default positional arguments in a function.
+    "E402",   # Supress module-import-not-at-top-of-file, needed in jupyter notebooks.
+    "E501",   # Supress line-too-long warnings: trust ruff's judgement on this one.
+    "PLR2004", # Allow to compare with unnamed numerical constants.
+
+    # Disable rules conflicting with ruff as a formatter,
+    # see https://docs.astral.sh/ruff/formatter/#conflicting-lint-rules
+    "E111",
+    "E114",
+    "E117",
+    "D206",
+    "D300",
+]
+
+[tool.ruff.lint.mccabe]
+max-complexity = 15
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.ruff.lint.pylint]
+max-args = 8
+
+[tool.ruff.lint.pep8-naming]
+classmethod-decorators = ["classmethod", "validator", "root_validator", "pydantic.validator"]
+
+[tool.ruff.lint.per-file-ignores]
+"*/__init__.py" = ["F401"]
+"**/tests/*" = [
+    "ANN001",  # type annotations don't add value for test functions
+    "ANN002",  # type annotations don't add value for test functions
+    "ANN003",  # type annotations don't add value for test functions
+    "ANN201",  # type annotations don't add value for test functions
+    "ANN204",  # type annotations don't add value for test functions
+    "ANN205",  # type annotations don't add value for test functions
+    "ANN206",  # type annotations don't add value for test functions
+    "D100",    # docstrings are overkill for test functions
+    "D101",
+    "D102",
+    "D103",
+    "S101",    # asserts are encouraged in pytest
+]
+
+[build-system]
+requires = ["uv_build>=0.11.3,<0.12.0"]
+build-backend = "uv_build"
+
