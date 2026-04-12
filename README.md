@@ -252,7 +252,7 @@ Shutting down the containers:
 docker compose -f docker-compose.yml down
 ```
 
-[Enable Banking]: (https://www.enablebanking.com)
-[Firefly III]: (https://www.firefly-iii.org/)
-[mkcert]: (https://github.com/FiloSottile/mkcert)
-[uv]: (https://docs.astral.sh/uv/)
+[Enable Banking]: https://www.enablebanking.com
+[Firefly III]: https://www.firefly-iii.org/
+[mkcert]: https://github.com/FiloSottile/mkcert
+[uv]: https://docs.astral.sh/uv/
