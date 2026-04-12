@@ -1,4 +1,4 @@
-""" Interactive CLI for persfin.
+"""Interactive CLI for persfin.
 
 Usage:
     uv run persfin-cli
@@ -14,7 +14,7 @@ Flow:
 import threading
 import time
 import webbrowser
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import polars as pl
@@ -22,7 +22,6 @@ import uvicorn
 
 from persfin.enablebanking import get_aspsps, get_balances, get_transactions, start_auth
 from persfin.main import app
-
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -41,7 +40,7 @@ def _prompt_bank_selection(country: str = "NO") -> tuple[str, str]:
         print(f"  {i:>3}.  {bank.name}")
 
     while True:
-        raw = input(f"\nSelect a bank [1–{len(banks)}]: ").strip()
+        raw = input(f"\nSelect a bank [1-{len(banks)}]: ").strip()
         if raw.isdigit():
             choice = int(raw)
             if 1 <= choice <= len(banks):
@@ -57,9 +56,14 @@ def _start_server_thread() -> None:
     keyfile = certdir / "localhost+2-key.pem"
     assert certfile.exists() and keyfile.exists()
     """Run uvicorn in a daemon thread so it stops when the process exits."""
-    config = uvicorn.Config(app, host="127.0.0.1", port=8000, log_level="warning",
-                            ssl_certfile=certfile,
-                            ssl_keyfile=keyfile)
+    config = uvicorn.Config(
+        app,
+        host="127.0.0.1",
+        port=8000,
+        log_level="warning",
+        ssl_certfile=certfile,
+        ssl_keyfile=keyfile,
+    )
     server = uvicorn.Server(config)
     thread = threading.Thread(target=server.run, daemon=True)
     thread.start()
@@ -92,7 +96,7 @@ def _print_session_summary() -> None:
         return
     session = next(iter(_persfin_main._sessions.values()))
 
-    date_from = (datetime.now(timezone.utc) - timedelta(days=90)).date().isoformat()
+    date_from = (datetime.now(UTC) - timedelta(days=90)).date().isoformat()
     print(f"\n{'=' * 60}")
     print(f"  Session ID : {session.session_id}")
     print(f"  Accounts   : {len(session.accounts)}")
@@ -108,8 +112,9 @@ def _print_session_summary() -> None:
             for b in bal_resp.balances:
                 label = b.balance_type or b.name or "balance"
                 print(
-                    f"   {label:<30} {b.balance_amount.amount} {b.balance_amount.currency}")
-        except Exception as exc:  # noqa: BLE001
+                    f"   {label:<30} {b.balance_amount.amount} {b.balance_amount.currency}"
+                )
+        except Exception as exc:
             print(f"   (Could not fetch balances: {exc})")
 
         # Transactions
@@ -125,20 +130,24 @@ def _print_session_summary() -> None:
                     amt = t.transaction_amount.amount
                     ccy = t.transaction_amount.currency
                     desc = (
-                            (t.remittance_information[
-                                 0] if t.remittance_information else None)
-                            or t.creditor_name
-                            or t.debtor_name
-                            or t.additional_information
-                            or ""
+                        (
+                            t.remittance_information[0]
+                            if t.remittance_information
+                            else None
+                        )
+                        or t.creditor_name
+                        or t.debtor_name
+                        or t.additional_information
+                        or ""
                     )
                     print(f"   {date:<12} {amt:>12} {ccy:<6}  {desc[:50]}")
                 if len(txns) > 20:
                     print(
-                        f"   … and {len(txns) - 20} more. Use the API for the full list.")
+                        f"   … and {len(txns) - 20} more. Use the API for the full list."
+                    )
             else:
                 print("   (no transactions found in this period)")
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             print(f"   (Could not fetch transactions: {exc})")
 
     print(f"\n{'=' * 60}\n")
@@ -158,7 +167,7 @@ def _export_transactions_to_csv(days: int = 90, output_dir: Path | None = None) 
     else:
         output_dir.mkdir(parents=True, exist_ok=True)
 
-    date_from = (datetime.now(timezone.utc) - timedelta(days=days)).date().isoformat()
+    date_from = (datetime.now(UTC) - timedelta(days=days)).date().isoformat()
 
     for account in session.accounts:
         uid = account.uid
@@ -173,7 +182,7 @@ def _export_transactions_to_csv(days: int = 90, output_dir: Path | None = None) 
                     date_from=date_from,
                     continuation_key=continuation_key,
                 )
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 print(f"  (Could not fetch transactions for {uid}: {exc})")
                 break
 
@@ -202,13 +211,16 @@ def _export_transactions_to_csv(days: int = 90, output_dir: Path | None = None) 
         safe_name = account.display_name.replace("/", "_").replace("\\", "_")
         csv_path = output_dir / f"{safe_name}.csv"
         df.write_csv(csv_path)
-        print(f"  Wrote {len(rows)} transaction(s) for account {account.display_name} → {csv_path}")
+        print(
+            f"  Wrote {len(rows)} transaction(s) for account {account.display_name} → {csv_path}"
+        )
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────
 
 
 def main() -> None:
+    """Run the CLI."""
     # 1. Let user pick a bank
     aspsp_name, aspsp_country = _prompt_bank_selection(country="NO")
 
@@ -224,7 +236,8 @@ def main() -> None:
         print("NOTE: Mock ASPSP requires you to be logged into enablebanking.com.")
         print("      1. Make sure you are signed in at https://enablebanking.com")
         print(
-            "      2. If you see 'No Account', click 'Create Account' to set up test data")
+            "      2. If you see 'No Account', click 'Create Account' to set up test data"
+        )
         print("      3. After creating an account, proceed through the consent flow")
         print()
     print("Waiting up to 10 minutes for you to complete the login...")

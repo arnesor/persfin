@@ -1,7 +1,7 @@
 """Enable Banking API client with JWT authentication."""
 
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import httpx
 import jwt
@@ -18,7 +18,7 @@ from persfin.models import (
 def _make_jwt() -> str:
     """Create a signed JWT for Enable Banking API authentication."""
     private_key = settings.pem_file.read_bytes()
-    iat = int(datetime.now(timezone.utc).timestamp())
+    iat = int(datetime.now(UTC).timestamp())
     payload = {
         "iss": "enablebanking.com",
         "aud": "api.enablebanking.com",
@@ -50,14 +50,9 @@ def get_aspsps(country: str = "NO") -> AspspsResponse:
 
 
 def start_auth(aspsp_name: str, aspsp_country: str) -> str:
-    """
-    Start the authorisation flow for a bank and return the redirect URL
-    that the user must visit to grant access.
-    """
+    """Start the authorisation flow for a bank and return the redirect URL."""
     body = {
-        "access": {
-            "valid_until": (datetime.now(timezone.utc) + timedelta(days=10)).isoformat()
-        },
+        "access": {"valid_until": (datetime.now(UTC) + timedelta(days=10)).isoformat()},
         "aspsp": {"name": aspsp_name, "country": aspsp_country},
         "state": str(uuid.uuid4()),
         "redirect_url": settings.redirect_url,
@@ -101,8 +96,7 @@ def get_transactions(
     date_from: str | None = None,
     continuation_key: str | None = None,
 ) -> TransactionsResponse:
-    """
-    Return transactions for the given account UID.
+    """Return transactions for the given account UID.
 
     `date_from` should be an ISO 8601 date string (YYYY-MM-DD).
     If `continuation_key` is provided it will be forwarded to page through results.

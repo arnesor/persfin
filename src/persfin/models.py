@@ -3,8 +3,8 @@ from typing import Any
 
 from pydantic import BaseModel, computed_field
 
-
 # ── ASPSP ────────────────────────────────────────────────────────────────────
+
 
 class Aspsp(BaseModel):
     name: str
@@ -18,6 +18,7 @@ class AspspsResponse(BaseModel):
 
 # ── Auth ─────────────────────────────────────────────────────────────────────
 
+
 class AuthRequest(BaseModel):
     aspsp_name: str
     aspsp_country: str
@@ -29,14 +30,17 @@ class AuthStartResponse(BaseModel):
 
 # ── Session ──────────────────────────────────────────────────────────────────
 
+
 class AccountIdentification(BaseModel):
     """Primary account identification (IBAN or other scheme)."""
+
     iban: str | None = None
     other: Any | None = None
 
 
 class GenericIdentification(BaseModel):
     """Alternative account identifier provided by the ASPSP."""
+
     identification: str | None = None
     scheme_name: str | None = None
 
@@ -48,6 +52,7 @@ class ClearingSystemMemberId(BaseModel):
 
 class AccountServicer(BaseModel):
     """Financial institution that services the account."""
+
     bic_fi: str | None = None
     clearing_system_member_id: ClearingSystemMemberId | None = None
     name: str | None = None
@@ -55,6 +60,7 @@ class AccountServicer(BaseModel):
 
 class AccountRef(BaseModel):
     """Full account resource as returned by the Enable Banking /sessions endpoint."""
+
     uid: str
     account_id: AccountIdentification | None = None
     all_account_ids: list[GenericIdentification] | None = None
@@ -87,6 +93,7 @@ class SessionResponse(BaseModel):
 
 # ── Balances ─────────────────────────────────────────────────────────────────
 
+
 class Amount(BaseModel):
     amount: str
     currency: str
@@ -106,6 +113,7 @@ class BalancesResponse(BaseModel):
 
 
 # ── Transactions ─────────────────────────────────────────────────────────────
+
 
 class Transaction(BaseModel):
     transaction_id: str | None = None

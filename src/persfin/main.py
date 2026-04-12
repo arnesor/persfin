@@ -1,5 +1,4 @@
-"""
-persfin - personal finance app backed by Enable Banking.
+"""persfin - personal finance app backed by Enable Banking.
 
 Start the server:
     uv run uvicorn persfin.main:app --reload
@@ -14,7 +13,7 @@ Typical flow:
 """
 
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import Annotated
 
 from fastapi import Cookie, Depends, FastAPI, HTTPException, Query, Response
@@ -53,7 +52,11 @@ _sessions: dict[str, SessionResponse] = {}
 CountryQuery = Annotated[str, Query(description="ISO 3166 two-letter country code")]
 
 
-@app.get("/banks", tags=["banks"], responses={502: {"description": "Upstream Enable Banking API error"}})
+@app.get(
+    "/banks",
+    tags=["banks"],
+    responses={502: {"description": "Upstream Enable Banking API error"}},
+)
 def list_banks(country: CountryQuery = "NO") -> AspspsResponse:
     """Return the list of supported banks / ASPSPs for a given country."""
     try:
@@ -66,10 +69,13 @@ def list_banks(country: CountryQuery = "NO") -> AspspsResponse:
 # ── Auth flow ────────────────────────────────────────────────────────────────
 
 
-@app.post("/connect", tags=["auth"], responses={502: {"description": "Upstream Enable Banking API error"}})
+@app.post(
+    "/connect",
+    tags=["auth"],
+    responses={502: {"description": "Upstream Enable Banking API error"}},
+)
 def connect(body: AuthRequest) -> dict[str, str]:
-    """
-    Start the authorisation flow for a bank.
+    """Start the authorisation flow for a bank.
 
     Returns `{"url": "<bank login URL>"}` - open that URL in a browser.
     The bank will redirect back to `/callback?code=…` when done.
@@ -85,21 +91,33 @@ def connect(body: AuthRequest) -> dict[str, str]:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
 
-AuthCode = Annotated[str, Query(..., description="Authorisation code returned by the bank")]
+AuthCode = Annotated[
+    str, Query(..., description="Authorisation code returned by the bank")
+]
 
 
-@app.get("/callback", tags=["auth"], responses={502: {"description": "Upstream Enable Banking API error"}})
+@app.get(
+    "/callback",
+    tags=["auth"],
+    responses={502: {"description": "Upstream Enable Banking API error"}},
+)
 def callback(code: AuthCode, response: Response) -> HTMLResponse:
-    """
-    OAuth redirect target. The bank redirects here after the user logs in.
-    Exchanges the `code` for a session, stores it keyed by session ID,
-    and sets a `session_id` cookie in the browser.
+    """OAuth redirect target.
+
+    The bank redirects here after the user logs in. Exchanges the `code` for a session,
+    stores it keyed by session ID, and sets a `session_id` cookie in the browser.
     """
     try:
         session = create_session(code=code)
         _sessions[session.session_id] = session
-        logger.info("Session created: %s (%d accounts)", session.session_id, len(session.accounts))
-        account_list = "".join(f"<li><code>{a.uid}</code></li>" for a in session.accounts)
+        logger.info(
+            "Session created: %s (%d accounts)",
+            session.session_id,
+            len(session.accounts),
+        )
+        account_list = "".join(
+            f"<li><code>{a.uid}</code></li>" for a in session.accounts
+        )
         html = f"""
         <html><body>
         <h2>✅ Connected!</h2>
@@ -109,7 +127,9 @@ def callback(code: AuthCode, response: Response) -> HTMLResponse:
         </body></html>
         """
         html_response = HTMLResponse(content=html)
-        html_response.set_cookie(key="session_id", value=session.session_id, httponly=True, samesite="lax")
+        html_response.set_cookie(
+            key="session_id", value=session.session_id, httponly=True, samesite="lax"
+        )
         return html_response
     except Exception as exc:
         logger.error("Callback failed: %s", exc)
@@ -131,13 +151,24 @@ def _require_session(session_id: str | None = Cookie(default=None)) -> SessionRe
 ActiveSession = Annotated[SessionResponse, Depends(_require_session)]
 
 
-@app.get("/accounts", tags=["accounts"], responses={401: {"description": "No active session"}})
+@app.get(
+    "/accounts",
+    tags=["accounts"],
+    responses={401: {"description": "No active session"}},
+)
 def get_accounts(session: ActiveSession) -> SessionResponse:
     """Return the accounts from the active session."""
     return session
 
 
-@app.get("/accounts/{account_uid}/balances", tags=["accounts"], responses={401: {"description": "No active session"}, 502: {"description": "Upstream Enable Banking API error"}})
+@app.get(
+    "/accounts/{account_uid}/balances",
+    tags=["accounts"],
+    responses={
+        401: {"description": "No active session"},
+        502: {"description": "Upstream Enable Banking API error"},
+    },
+)
 def account_balances(account_uid: str, _session: ActiveSession) -> BalancesResponse:
     """Return balances for the given account UID."""
     try:
@@ -147,11 +178,25 @@ def account_balances(account_uid: str, _session: ActiveSession) -> BalancesRespo
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
 
-DateFromQuery = Annotated[str | None, Query(description="Fetch transactions from this date (YYYY-MM-DD). Defaults to 90 days ago.")]
-ContinuationKeyQuery = Annotated[str | None, Query(description="Pagination key from a previous response")]
+DateFromQuery = Annotated[
+    str | None,
+    Query(
+        description="Fetch transactions from this date (YYYY-MM-DD). Defaults to 90 days ago."
+    ),
+]
+ContinuationKeyQuery = Annotated[
+    str | None, Query(description="Pagination key from a previous response")
+]
 
 
-@app.get("/accounts/{account_uid}/transactions", tags=["accounts"], responses={401: {"description": "No active session"}, 502: {"description": "Upstream Enable Banking API error"}})
+@app.get(
+    "/accounts/{account_uid}/transactions",
+    tags=["accounts"],
+    responses={
+        401: {"description": "No active session"},
+        502: {"description": "Upstream Enable Banking API error"},
+    },
+)
 def account_transactions(
     account_uid: str,
     _session: ActiveSession,
@@ -160,7 +205,7 @@ def account_transactions(
 ) -> TransactionsResponse:
     """Return transactions for the given account UID."""
     if date_from is None:
-        date_from = (datetime.now(timezone.utc) - timedelta(days=90)).date().isoformat()
+        date_from = (datetime.now(UTC) - timedelta(days=90)).date().isoformat()
     try:
         return get_transactions(
             account_uid=account_uid,
@@ -176,6 +221,7 @@ def account_transactions(
 
 
 def main() -> None:
+    """Run the server."""
     import uvicorn
 
     uvicorn.run("persfin.main:app", host="0.0.0.0", port=8000, reload=True)
