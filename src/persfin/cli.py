@@ -51,11 +51,11 @@ def _prompt_bank_selection(country: str = "NO") -> tuple[str, str]:
 
 
 def _start_server_thread() -> None:
+    """Run uvicorn in a daemon thread so it stops when the process exits."""
     certdir = Path(__file__).parent.parent.parent / "firefly" / "certs"
     certfile = certdir / "localhost+2.pem"
     keyfile = certdir / "localhost+2-key.pem"
     assert certfile.exists() and keyfile.exists()
-    """Run uvicorn in a daemon thread so it stops when the process exits."""
     config = uvicorn.Config(
         app,
         host="127.0.0.1",
