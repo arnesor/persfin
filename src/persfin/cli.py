@@ -1,5 +1,4 @@
-"""
-Interactive CLI for persfin.
+""" Interactive CLI for persfin.
 
 Usage:
     uv run persfin-cli
@@ -18,6 +17,7 @@ import webbrowser
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import polars as pl
 import uvicorn
 
 from persfin.enablebanking import get_aspsps, get_balances, get_transactions, start_auth
@@ -100,7 +100,7 @@ def _print_session_summary() -> None:
 
     for account in session.accounts:
         uid = account.uid
-        print(f"\n-- Account: {uid} --")
+        print(f"\n-- Account: {account.display_name} (uid: {uid}) --")
 
         # Balances
         try:
@@ -144,6 +144,67 @@ def _print_session_summary() -> None:
     print(f"\n{'=' * 60}\n")
 
 
+def _export_transactions_to_csv(days: int = 90, output_dir: Path | None = None) -> None:
+    """Fetch all transactions for every account in the active session and write one CSV per account."""
+    import persfin.main as _persfin_main
+
+    if not _persfin_main._sessions:
+        print("No session available — cannot export transactions.")
+        return
+    session = next(iter(_persfin_main._sessions.values()))
+
+    if output_dir is None:
+        output_dir = Path.cwd()
+    else:
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+    date_from = (datetime.now(timezone.utc) - timedelta(days=days)).date().isoformat()
+
+    for account in session.accounts:
+        uid = account.uid
+        rows: list[dict] = []
+
+        # Page through all transactions using continuation_key
+        continuation_key: str | None = None
+        while True:
+            try:
+                resp = get_transactions(
+                    account_uid=uid,
+                    date_from=date_from,
+                    continuation_key=continuation_key,
+                )
+            except Exception as exc:  # noqa: BLE001
+                print(f"  (Could not fetch transactions for {uid}: {exc})")
+                break
+
+            rows.extend(
+                {
+                    "booking_date": t.booking_date,
+                    "amount": t.transaction_amount.amount,
+                    "currency": t.transaction_amount.currency,
+                    "credit_debit_indicator": t.credit_debit_indicator,
+                    "status": t.status,
+                    "remittance_information": (
+                        "|".join(t.remittance_information)
+                        if t.remittance_information
+                        else None
+                    ),
+                }
+                for t in resp.transactions
+            )
+            continuation_key = resp.continuation_key
+            if not continuation_key:
+                break
+
+        df = pl.DataFrame(rows, infer_schema_length=len(rows) or 1)
+        df = df.filter(pl.col("status") != "PDNG")
+
+        safe_name = account.display_name.replace("/", "_").replace("\\", "_")
+        csv_path = output_dir / f"{safe_name}.csv"
+        df.write_csv(csv_path)
+        print(f"  Wrote {len(rows)} transaction(s) for account {account.display_name} → {csv_path}")
+
+
 # ── Entry point ───────────────────────────────────────────────────────────────
 
 
@@ -175,6 +236,11 @@ def main() -> None:
 
     # 5. Print a summary
     _print_session_summary()
+
+    # 6. Export all transactions to CSV files
+    print("\nExporting transactions to CSV...")
+    _export_transactions_to_csv()
+    print("Done.")
 
 
 if __name__ == "__main__":
