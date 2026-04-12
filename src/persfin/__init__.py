@@ -1,3 +1,9 @@
-from persfin.main import main as run_server
+"""persfin package."""
 
-__all__ = ["run_server"]
+__version__ = "0.1.0"
+
+
+def run_server() -> None:
+    from persfin.main import main
+
+    main()

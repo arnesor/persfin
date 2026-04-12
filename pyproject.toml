@@ -19,7 +19,7 @@ dependencies = [
 ]
 
 [project.scripts]
-persfin = "persfin:run_server"
+persfin = "persfin.main:main"
 persfin-cli = "persfin.cli:main"
 
 [build-system]

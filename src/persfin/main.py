@@ -20,7 +20,13 @@ from typing import Annotated
 from fastapi import Cookie, Depends, FastAPI, HTTPException, Query, Response
 from fastapi.responses import HTMLResponse
 
-from persfin import enablebanking
+from persfin.enablebanking import (
+    create_session,
+    get_aspsps,
+    get_balances,
+    get_transactions,
+    start_auth,
+)
 from persfin.models import (
     AspspsResponse,
     AuthRequest,
@@ -51,7 +57,7 @@ CountryQuery = Annotated[str, Query(description="ISO 3166 two-letter country cod
 def list_banks(country: CountryQuery = "NO") -> AspspsResponse:
     """Return the list of supported banks / ASPSPs for a given country."""
     try:
-        return enablebanking.get_aspsps(country=country)
+        return get_aspsps(country=country)
     except Exception as exc:
         logger.error("Failed to fetch ASPSPs: %s", exc)
         raise HTTPException(status_code=502, detail=str(exc)) from exc
@@ -69,7 +75,7 @@ def connect(body: AuthRequest) -> dict[str, str]:
     The bank will redirect back to `/callback?code=…` when done.
     """
     try:
-        url = enablebanking.start_auth(
+        url = start_auth(
             aspsp_name=body.aspsp_name,
             aspsp_country=body.aspsp_country,
         )
@@ -90,7 +96,7 @@ def callback(code: AuthCode, response: Response) -> HTMLResponse:
     and sets a `session_id` cookie in the browser.
     """
     try:
-        session = enablebanking.create_session(code=code)
+        session = create_session(code=code)
         _sessions[session.session_id] = session
         logger.info("Session created: %s (%d accounts)", session.session_id, len(session.accounts))
         account_list = "".join(f"<li><code>{a.uid}</code></li>" for a in session.accounts)
@@ -135,7 +141,7 @@ def get_accounts(session: ActiveSession) -> SessionResponse:
 def account_balances(account_uid: str, _session: ActiveSession) -> BalancesResponse:
     """Return balances for the given account UID."""
     try:
-        return enablebanking.get_balances(account_uid=account_uid)
+        return get_balances(account_uid=account_uid)
     except Exception as exc:
         logger.error("Failed to fetch balances for %s: %s", account_uid, exc)
         raise HTTPException(status_code=502, detail=str(exc)) from exc
@@ -156,7 +162,7 @@ def account_transactions(
     if date_from is None:
         date_from = (datetime.now(timezone.utc) - timedelta(days=90)).date().isoformat()
     try:
-        return enablebanking.get_transactions(
+        return get_transactions(
             account_uid=account_uid,
             date_from=date_from,
             continuation_key=continuation_key,

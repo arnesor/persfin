@@ -20,7 +20,7 @@ from pathlib import Path
 
 import uvicorn
 
-from persfin import enablebanking
+from persfin.enablebanking import get_aspsps, get_balances, get_transactions, start_auth
 from persfin.main import app
 
 
@@ -30,7 +30,7 @@ from persfin.main import app
 def _prompt_bank_selection(country: str = "NO") -> tuple[str, str]:
     """Fetch ASPSPs for *country*, list them, and return the chosen (name, country)."""
     print(f"\nFetching available banks for country '{country}'…")
-    response = enablebanking.get_aspsps(country=country)
+    response = get_aspsps(country=country)
     banks = response.aspsps
 
     if not banks:
@@ -104,7 +104,7 @@ def _print_session_summary() -> None:
 
         # Balances
         try:
-            bal_resp = enablebanking.get_balances(account_uid=uid)
+            bal_resp = get_balances(account_uid=uid)
             for b in bal_resp.balances:
                 label = b.balance_type or b.name or "balance"
                 print(
@@ -114,8 +114,7 @@ def _print_session_summary() -> None:
 
         # Transactions
         try:
-            txn_resp = enablebanking.get_transactions(account_uid=uid,
-                                                      date_from=date_from)
+            txn_resp = get_transactions(account_uid=uid, date_from=date_from)
             txns = txn_resp.transactions
             print(f"\n   Transactions since {date_from} ({len(txns)} total):")
             if txns:
@@ -156,8 +155,7 @@ def main() -> None:
     _start_server_thread()
 
     # 3. Get the OAuth URL and open it
-    auth_url = enablebanking.start_auth(aspsp_name=aspsp_name,
-                                        aspsp_country=aspsp_country)
+    auth_url = start_auth(aspsp_name=aspsp_name, aspsp_country=aspsp_country)
     print("\nOpening browser for bank login...")
     print(f"  URL: {auth_url}")
     print()
