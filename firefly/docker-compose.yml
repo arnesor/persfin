@@ -6,6 +6,8 @@
 # Other URL's will give 500 | Server Error
 #
 
+name: firefly
+
 services:
   app:
     image: fireflyiii/core:latest
