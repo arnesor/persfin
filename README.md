@@ -1,19 +1,20 @@
 # persfin
 
-Personal finance app that fetches Norwegian bank transactions via [Enable Banking](https://enablebanking.com).
+Personal finance app that fetches European bank transactions via [Enable Banking].
 
 ## Requirements
 
 - Python 3.13+
-- [uv](https://docs.astral.sh/uv/) package manager
-- A sandbox (or production) app registered at [enablebanking.com](https://enablebanking.com)
-- The private key `.pem` file downloaded when registering the app, placed in the project root
+- [uv] package manager.
+- A sandbox or production app registered at [Enable Banking].
+- The private key `.pem` file downloaded when registering the Enable Banking app, placed in the project root.
+- A self-signed certificate for https.
 
 ## Configure Enable Banking
-1. Register a user at [enablebanking.com](https://enablebanking.com).
+1. Register a user at [Enable Banking].
 2. Click on your profile name and select API applications.
 3. Add a new sandbox application.
-   - Select Generate a private RSA key in browser.
+   - Select Generate a private RSA key in the browser.
    - Enter an application name.
    - Allowed redirect URLs:
      - http://localhost:8000/callback
@@ -22,19 +23,27 @@ Personal finance app that fetches Norwegian bank transactions via [Enable Bankin
    - Download the `.pem` file and store it in the root directory of the repo.
    - The application ID is the first part of the `.pem` file name.
 
-### Setup a self signed certificate for https
+## Setup a self signed certificate for https
 
 1. Install mkcert:
 
+| Platform | Command                              |
+|---|---------------------------------------------|
+| Windows | `winget install FiloSottile.mkcert`   |
+| Linux | `sudo apt install mkcert libnss3-tools` |
+| macOS | `brew install mkcert`                   |
+
+And then: 
+
 ```shell
-winget install FiloSottile.mkcert      # On Windows
-sudo apt install mkcert libnss3-tools  # On Linux
+mkcert -install
 ```
 
 2. Create a self-signed certificate:
 
+Run this from the `firefly/certs/` directory:
+
 ```shell
-mkcert -install
 mkcert localhost importer.localhost firefly.localhost
 ```
 
@@ -205,3 +214,7 @@ docker compose -f docker-compose.yml up -d --pull=always
 docker compose -f docker-compose.yml logs -f
 docker compose -f docker-compose.yml down
 ```
+
+[Enable Banking]: (https://www.enablebanking.com)
+[mkcert]: (https://github.com/FiloSottile/mkcert)
+[uv]: (https://docs.astral.sh/uv/)

@@ -16,6 +16,7 @@ import threading
 import time
 import webbrowser
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import uvicorn
 
@@ -51,10 +52,14 @@ def _prompt_bank_selection(country: str = "NO") -> tuple[str, str]:
 
 
 def _start_server_thread() -> None:
+    certdir = Path(__file__).parent.parent.parent / "firefly" / "certs"
+    certfile = certdir / "localhost+2.pem"
+    keyfile = certdir / "localhost+2-key.pem"
+    assert certfile.exists() and keyfile.exists()
     """Run uvicorn in a daemon thread so it stops when the process exits."""
     config = uvicorn.Config(app, host="127.0.0.1", port=8000, log_level="warning",
-                            ssl_certfile="localhost+2.pem",
-                            ssl_keyfile="localhost+2-key.pem")
+                            ssl_certfile=certfile,
+                            ssl_keyfile=keyfile)
     server = uvicorn.Server(config)
     thread = threading.Thread(target=server.run, daemon=True)
     thread.start()

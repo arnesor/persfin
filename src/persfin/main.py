@@ -1,16 +1,16 @@
 """
-persfin – personal finance app backed by Enable Banking.
+persfin - personal finance app backed by Enable Banking.
 
 Start the server:
     uv run uvicorn persfin.main:app --reload
 
 Typical flow:
-    1. GET  /banks?country=NO         – list available Norwegian banks
-    2. POST /connect                  – start OAuth flow, returns bank redirect URL
+    1. GET  /banks?country=NO            - list available Norwegian banks
+    2. POST /connect                     - start OAuth flow, returns bank redirect URL
     3. Browser redirected to bank → user logs in → bank redirects to /callback?code=…
-    4. GET  /accounts                 – list accounts from the active session
-    5. GET  /accounts/{uid}/balances
-    6. GET  /accounts/{uid}/transactions
+    4. GET  /accounts                    - list accounts from the active session
+    5. GET  /accounts/{uid}/balances     - get balances for an account
+    6. GET  /accounts/{uid}/transactions - list transactions
 """
 
 import logging
@@ -33,7 +33,7 @@ logger = logging.getLogger(__name__)
 
 app = FastAPI(
     title="persfin",
-    description="Personal finance – Enable Banking integration",
+    description="Personal finance - Enable Banking integration",
     version="0.1.0",
 )
 
@@ -65,7 +65,7 @@ def connect(body: AuthRequest) -> dict[str, str]:
     """
     Start the authorisation flow for a bank.
 
-    Returns `{"url": "<bank login URL>"}` – open that URL in a browser.
+    Returns `{"url": "<bank login URL>"}` - open that URL in a browser.
     The bank will redirect back to `/callback?code=…` when done.
     """
     try:
