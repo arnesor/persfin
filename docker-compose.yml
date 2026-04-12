@@ -33,7 +33,7 @@ services:
       - firefly_iii_db:/var/lib/mysql
 
   importer:
-    image: fireflyiii/data-importer:latest
+    image: fireflyiii/data-importer:develop
     hostname: importer
     restart: always
     container_name: firefly_iii_importer
