@@ -52,7 +52,7 @@ def get_aspsps(country: str = "NO") -> AspspsResponse:
 def start_auth(aspsp_name: str, aspsp_country: str) -> str:
     """Start the authorisation flow for a bank and return the redirect URL."""
     body = {
-        "access": {"valid_until": (datetime.now(UTC) + timedelta(days=10)).isoformat()},
+        "access": {"valid_until": (datetime.now(UTC) + timedelta(days=90)).isoformat()},
         "aspsp": {"name": aspsp_name, "country": aspsp_country},
         "state": str(uuid.uuid4()),
         "redirect_url": settings.redirect_url,

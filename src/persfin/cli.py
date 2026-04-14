@@ -22,6 +22,13 @@ import uvicorn
 
 from persfin.enablebanking import get_aspsps, get_balances, get_transactions, start_auth
 from persfin.main import app
+from persfin.models import CachedSession, SessionResponse
+
+# ── Constants ────────────────────────────────────────────────────────────────
+
+_CACHE_DIR = Path.home() / ".persfin"
+_CACHE_FILE = _CACHE_DIR / "session_cache.json"
+_SESSION_VALIDITY_DAYS = 90
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -216,41 +223,87 @@ def _export_transactions_to_csv(days: int = 90, output_dir: Path | None = None) 
         )
 
 
+# ── Session cache ─────────────────────────────────────────────────────────────
+
+
+def _load_cached_session() -> SessionResponse | None:
+    """Load a SessionResponse from the on-disk cache if it exists and has not expired."""
+    if not _CACHE_FILE.exists():
+        return None
+    try:
+        cached = CachedSession.model_validate_json(
+            _CACHE_FILE.read_text(encoding="utf-8")
+        )
+        if cached.is_valid():
+            print(f"Using cached session (valid until {cached.valid_until.date()}).")
+            return cached.to_session_response()
+        print("Cached session has expired — re-authenticating.")
+    except Exception as exc:
+        print(f"Could not read session cache ({exc}) — re-authenticating.")
+    return None
+
+
+def _save_session_cache(session: SessionResponse) -> None:
+    """Persist the session to disk so that future runs skip authentication."""
+    _CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    valid_until = datetime.now(UTC) + timedelta(days=_SESSION_VALIDITY_DAYS)
+    cached = CachedSession(
+        session_id=session.session_id,
+        accounts=session.accounts,
+        valid_until=valid_until,
+    )
+    _CACHE_FILE.write_text(cached.model_dump_json(indent=2), encoding="utf-8")
+    print(f"Session cached until {valid_until.date()} → {_CACHE_FILE}")
+
+
 # ── Entry point ───────────────────────────────────────────────────────────────
 
 
 def main() -> None:
     """Run the CLI."""
-    # 1. Let user pick a bank
-    aspsp_name, aspsp_country = _prompt_bank_selection(country="NO")
+    import persfin.main as _persfin_main
 
-    # 2. Start local server so /callback works
-    _start_server_thread()
+    # 1. Try to reuse a valid cached session (skips BankID login)
+    cached_session = _load_cached_session()
+    if cached_session is not None:
+        _persfin_main._sessions[cached_session.session_id] = cached_session
+    else:
+        # 2. No valid cache — run the full OAuth / BankID flow
+        aspsp_name, aspsp_country = _prompt_bank_selection(country="NO")
 
-    # 3. Get the OAuth URL and open it
-    auth_url = start_auth(aspsp_name=aspsp_name, aspsp_country=aspsp_country)
-    print("\nOpening browser for bank login...")
-    print(f"  URL: {auth_url}")
-    print()
-    if aspsp_name == "Mock ASPSP":
-        print("NOTE: Mock ASPSP requires you to be logged into enablebanking.com.")
-        print("      1. Make sure you are signed in at https://enablebanking.com")
-        print(
-            "      2. If you see 'No Account', click 'Create Account' to set up test data"
-        )
-        print("      3. After creating an account, proceed through the consent flow")
+        # 3. Start local HTTPS server so /callback works
+        _start_server_thread()
+
+        # 4. Get the OAuth URL and open it in the browser
+        auth_url = start_auth(aspsp_name=aspsp_name, aspsp_country=aspsp_country)
+        print("\nOpening browser for bank login...")
+        print(f"  URL: {auth_url}")
         print()
-    print("Waiting up to 10 minutes for you to complete the login...")
-    webbrowser.open(auth_url)
+        if aspsp_name == "Mock ASPSP":
+            print("NOTE: Mock ASPSP requires you to be logged into enablebanking.com.")
+            print("      1. Make sure you are signed in at https://enablebanking.com")
+            print(
+                "      2. If you see 'No Account', click 'Create Account' to set up test data"
+            )
+            print(
+                "      3. After creating an account, proceed through the consent flow"
+            )
+            print()
+        print("Waiting up to 10 minutes for you to complete the login...")
+        webbrowser.open(auth_url)
 
-    # 4. Wait until the bank redirects back and the session is stored
-    _wait_for_session(timeout=600)
-    print("\nLogin successful!")
+        # 5. Wait until the bank redirects back and the session is stored
+        _wait_for_session(timeout=600)
+        print("\nLogin successful!")
 
-    # 5. Print a summary
+        # 6. Persist the new session so future runs skip authentication
+        new_session = next(iter(_persfin_main._sessions.values()))
+        _save_session_cache(new_session)
+
+    # 7. Print a summary
     _print_session_summary()
 
-    # 6. Export all transactions to CSV files
+    # 8. Export all transactions to CSV files
     print("\nExporting transactions to CSV...")
     _export_transactions_to_csv()
     print("Done.")
