@@ -2,20 +2,22 @@
 
 Uses FastAPI's TestClient (synchronous httpx wrapper) as recommended in the
 FastAPI documentation. All Enable Banking API calls are mocked via pytest-mock
-so no real network traffic is made.
+to avoid real network traffic.
 
-Fixtures (defined in conftest.py):
+Key patterns:
 - ``client``        — unauthenticated TestClient
-- ``authed_client`` — TestClient with fake_session injected and cookie set
-- ``fake_session``  — a SessionResponse with one account
-- ``clear_sessions``— autouse; resets persfin.main._sessions between tests
+- ``authed_client`` — TestClient with a session stored in fresh_store + cookie set
+- ``fresh_store``   — autouse; supplies an isolated SessionStore per test via DI override
+- Exception mocks use ``httpx.HTTPError`` (or subclasses) so the global handler fires
 """
 
 import re
 
+import httpx
 import pytest
 from fastapi.testclient import TestClient
 
+from persfin.main import SessionStore
 from persfin.models import (
     Amount,
     Aspsp,
@@ -27,12 +29,64 @@ from persfin.models import (
     TransactionsResponse,
 )
 
+# ── SessionStore unit tests ───────────────────────────────────────────────────
+
+
+class TestSessionStore:
+    def test_put_and_get(self, fake_session: SessionResponse) -> None:
+        store = SessionStore()
+        store.put(fake_session)
+        assert store.get(fake_session.session_id) == fake_session
+
+    def test_get_missing_returns_none(self) -> None:
+        assert SessionStore().get("ghost") is None
+
+    def test_contains(self, fake_session: SessionResponse) -> None:
+        store = SessionStore()
+        assert fake_session.session_id not in store
+        store.put(fake_session)
+        assert fake_session.session_id in store
+
+    def test_ids(self, fake_session: SessionResponse) -> None:
+        store = SessionStore()
+        store.put(fake_session)
+        assert store.ids() == {fake_session.session_id}
+
+    def test_all(self, fake_session: SessionResponse) -> None:
+        store = SessionStore()
+        store.put(fake_session)
+        assert store.all() == [fake_session]
+
+    def test_bool_empty(self) -> None:
+        assert not SessionStore()
+
+    def test_bool_non_empty(self, fake_session: SessionResponse) -> None:
+        store = SessionStore()
+        store.put(fake_session)
+        assert store
+
+    def test_len(self, fake_session: SessionResponse) -> None:
+        store = SessionStore()
+        assert len(store) == 0
+        store.put(fake_session)
+        assert len(store) == 1
+
+    def test_put_overwrites(self, fake_account: SessionResponse) -> None:
+        store = SessionStore()
+        s1 = SessionResponse(session_id="id", accounts=[])
+        s2 = SessionResponse(session_id="id", accounts=[])
+        store.put(s1)
+        store.put(s2)
+        assert len(store) == 1
+
 
 # ── GET /banks ────────────────────────────────────────────────────────────────
 
 
 class TestListBanks:
-    def test_returns_bank_list(self, client: TestClient, mocker: pytest.MonkeyPatch) -> None:
+    def test_returns_bank_list(
+        self, client: TestClient, mocker: pytest.MonkeyPatch
+    ) -> None:
         mocker.patch(
             "persfin.main.get_aspsps",
             return_value=AspspsResponse(aspsps=[Aspsp(name="TestBank", country="NO")]),
@@ -61,7 +115,9 @@ class TestListBanks:
     def test_upstream_error_returns_502(
         self, client: TestClient, mocker: pytest.MonkeyPatch
     ) -> None:
-        mocker.patch("persfin.main.get_aspsps", side_effect=RuntimeError("upstream down"))
+        mocker.patch(
+            "persfin.main.get_aspsps", side_effect=httpx.HTTPError("upstream down")
+        )
 
         response = client.get("/banks")
 
@@ -104,7 +160,9 @@ class TestConnect:
     def test_upstream_error_returns_502(
         self, client: TestClient, mocker: pytest.MonkeyPatch
     ) -> None:
-        mocker.patch("persfin.main.start_auth", side_effect=ValueError("bad request"))
+        mocker.patch(
+            "persfin.main.start_auth", side_effect=httpx.HTTPError("bad request")
+        )
 
         response = client.post(
             "/connect",
@@ -136,20 +194,20 @@ class TestCallback:
         assert "✅ Connected!" in response.text
         assert fake_session.session_id in response.text
 
-    def test_stores_session_in_memory(
+    def test_stores_session_in_store(
         self,
         client: TestClient,
         mocker: pytest.MonkeyPatch,
         fake_session: SessionResponse,
+        fresh_store: SessionStore,
     ) -> None:
-        import persfin.main as m
-
         mocker.patch("persfin.main.create_session", return_value=fake_session)
 
         client.get("/callback?code=auth-code-123")
 
-        assert fake_session.session_id in m._sessions
-        assert m._sessions[fake_session.session_id] == fake_session
+        # fresh_store is wired as the DI override — the handler writes into it
+        assert fake_session.session_id in fresh_store
+        assert fresh_store.get(fake_session.session_id) == fake_session
 
     def test_sets_session_cookie(
         self,
@@ -168,7 +226,7 @@ class TestCallback:
         self, client: TestClient, mocker: pytest.MonkeyPatch
     ) -> None:
         mocker.patch(
-            "persfin.main.create_session", side_effect=RuntimeError("token expired")
+            "persfin.main.create_session", side_effect=httpx.HTTPError("token expired")
         )
 
         response = client.get("/callback?code=bad-code")
@@ -257,7 +315,9 @@ class TestAccountBalances:
         authed_client: TestClient,
         mocker: pytest.MonkeyPatch,
     ) -> None:
-        mocker.patch("persfin.main.get_balances", side_effect=RuntimeError("timed out"))
+        mocker.patch(
+            "persfin.main.get_balances", side_effect=httpx.HTTPError("timed out")
+        )
 
         response = authed_client.get("/accounts/uid-abc123/balances")
 
@@ -309,11 +369,19 @@ class TestAccountTransactions:
 
         authed_client.get("/accounts/uid-abc123/transactions?date_from=2026-01-01")
 
+        # The endpoint converts date → isoformat str before calling get_transactions
         mock.assert_called_once_with(
             account_uid="uid-abc123",
             date_from="2026-01-01",
             continuation_key=None,
         )
+
+    def test_invalid_date_from_returns_422(self, authed_client: TestClient) -> None:
+        """FastAPI/pydantic validates date_from as a real date — bad input → 422."""
+        response = authed_client.get(
+            "/accounts/uid-abc123/transactions?date_from=not-a-date"
+        )
+        assert response.status_code == 422
 
     def test_uses_90_day_default_when_date_not_specified(
         self,
@@ -351,7 +419,7 @@ class TestAccountTransactions:
     ) -> None:
         mocker.patch(
             "persfin.main.get_transactions",
-            side_effect=RuntimeError("connection reset"),
+            side_effect=httpx.HTTPError("connection reset"),
         )
 
         response = authed_client.get("/accounts/uid-abc123/transactions")

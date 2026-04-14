@@ -29,8 +29,8 @@ import polars as pl
 import uvicorn
 
 from persfin.enablebanking import get_aspsps, get_balances, get_transactions, start_auth
-from persfin.main import app
-from persfin.models import BankSession
+from persfin.main import app, get_store
+from persfin.models import BankSession, SessionResponse
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -122,32 +122,50 @@ def _start_server_thread() -> None:
 
 
 def _wait_for_new_session(known_ids: set[str], timeout: int = 600) -> str:
-    """Block until a session ID not in *known_ids* appears in the in-memory store.
+    """Block until a session ID not in *known_ids* appears in the store.
 
     Returns the new session ID once the bank callback has been processed.
+    Uses ``get_store()`` so it reads from the same store that the running
+    FastAPI server writes to.
     """
-    import persfin.main as _persfin_main
-
+    store = get_store()
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        new = set(_persfin_main._sessions.keys()) - known_ids
+        new = store.ids() - known_ids
         if new:
             return next(iter(new))
         time.sleep(0.5)
     raise SystemExit("Timed out waiting for bank callback. Please try again.")
 
 
-def _print_session_summary() -> None:
-    """Print account balances and recent transactions for every active session."""
-    import persfin.main as _persfin_main
+def _export_transactions_to_csv(
+    sessions: list[SessionResponse],
+    days: int = 90,
+    output_dir: Path | None = None,
+) -> None:
+    """Fetch transactions for every account, print a preview, and write one CSV per account.
 
-    if not _persfin_main._sessions:
-        print("No session available.")
+    For each account:
+    - Prints the IBAN / account identifier and balances.
+    - Fetches all transactions (paging through continuation keys).
+    - Prints a preview of up to 20 rows.
+    - Writes the full set to a CSV file.
+
+    Only one fetch per account is made, avoiding bank-side rate limits that
+    can trigger a 429 when the same endpoint is called twice in quick succession.
+    """
+    if not sessions:
+        print("No session available — cannot export transactions.")
         return
 
-    date_from = (datetime.now(UTC) - timedelta(days=90)).date().isoformat()
+    if output_dir is None:
+        output_dir = Path.cwd()
+    else:
+        output_dir.mkdir(parents=True, exist_ok=True)
 
-    for session in _persfin_main._sessions.values():
+    date_from = (datetime.now(UTC) - timedelta(days=days)).date().isoformat()
+
+    for session in sessions:
         print(f"\n{'=' * 60}")
         print(f"  Session ID : {session.session_id}")
         print(f"  Accounts   : {len(session.accounts)}")
@@ -168,66 +186,11 @@ def _print_session_summary() -> None:
             except Exception as exc:
                 print(f"   (Could not fetch balances: {exc})")
 
-            # Transactions
-            try:
-                txn_resp = get_transactions(account_uid=uid, date_from=date_from)
-                txns = txn_resp.transactions
-                print(f"\n   Transactions since {date_from} ({len(txns)} total):")
-                if txns:
-                    print(
-                        f"   {'Date':<12} {'Amount':>12} {'Currency':<6}  Description"
-                    )
-                    print(f"   {'-' * 12} {'-' * 12} {'-' * 6}  {'-' * 30}")
-                    for t in txns[:20]:
-                        date = t.booking_date or t.value_date or "???"
-                        amt = t.transaction_amount.amount
-                        ccy = t.transaction_amount.currency
-                        desc = (
-                            (
-                                t.remittance_information[0]
-                                if t.remittance_information
-                                else None
-                            )
-                            or t.creditor_name
-                            or t.debtor_name
-                            or t.additional_information
-                            or ""
-                        )
-                        print(f"   {date:<12} {amt:>12} {ccy:<6}  {desc[:50]}")
-                    if len(txns) > 20:
-                        print(
-                            f"   … and {len(txns) - 20} more. Use the API for the full list."
-                        )
-                else:
-                    print("   (no transactions found in this period)")
-            except Exception as exc:
-                print(f"   (Could not fetch transactions: {exc})")
-
-    print(f"\n{'=' * 60}\n")
-
-
-def _export_transactions_to_csv(days: int = 90, output_dir: Path | None = None) -> None:
-    """Fetch all transactions for every account across all sessions and write one CSV per account."""
-    import persfin.main as _persfin_main
-
-    if not _persfin_main._sessions:
-        print("No session available — cannot export transactions.")
-        return
-
-    if output_dir is None:
-        output_dir = Path.cwd()
-    else:
-        output_dir.mkdir(parents=True, exist_ok=True)
-
-    date_from = (datetime.now(UTC) - timedelta(days=days)).date().isoformat()
-
-    for session in _persfin_main._sessions.values():
-        for account in session.accounts:
-            uid = account.uid
+            # Fetch all transactions (single call, paged)
             rows: list[dict] = []
-
-            # Page through all transactions using continuation_key
             continuation_key: str | None = None
+            fetch_error: str | None = None
+
             while True:
                 try:
                     resp = get_transactions(
@@ -236,7 +199,7 @@ def _export_transactions_to_csv(days: int = 90, output_dir: Path | None = None) 
                         continuation_key=continuation_key,
                     )
                 except Exception as exc:
-                    print(f"  (Could not fetch transactions for {uid}: {exc})")
+                    fetch_error = str(exc)
                     break
 
                 rows.extend(
@@ -258,6 +221,26 @@ def _export_transactions_to_csv(days: int = 90, output_dir: Path | None = None) 
                 if not continuation_key:
                     break
 
+            # Print transaction preview (up to 20 rows)
+            print(f"\n   Transactions since {date_from} ({len(rows)} total):")
+            if fetch_error:
+                print(f"   (Could not fetch transactions: {fetch_error})")
+            elif rows:
+                print(f"   {'Date':<12} {'Amount':>14} {'Currency':<6}  Description")
+                print(f"   {'-' * 12} {'-' * 14} {'-' * 6}  {'-' * 30}")
+                for row in rows[:20]:
+                    print(
+                        f"   {(row['booking_date'] or '???'):<12}"
+                        f" {row['amount']:>14}"
+                        f" {row['currency']:<6}"
+                        f"  {(row['remittance_information'] or '')[:50]}"
+                    )
+                if len(rows) > 20:
+                    print(f"   … and {len(rows) - 20} more (all written to CSV).")
+            else:
+                print("   (no transactions found in this period)")
+
+            # Write CSV
             if not rows:
                 print(
                     f"  (No transactions fetched for {account.display_name} — skipping CSV)"
@@ -270,9 +253,9 @@ def _export_transactions_to_csv(days: int = 90, output_dir: Path | None = None) 
             safe_name = account.display_name.replace("/", "_").replace("\\", "_")
             csv_path = output_dir / f"{safe_name}.csv"
             df.write_csv(csv_path)
-            print(
-                f"  Wrote {len(rows)} transaction(s) for account {account.display_name} → {csv_path}"
-            )
+            print(f"   → Wrote {len(rows)} row(s) to {csv_path}")
+
+    print(f"\n{'=' * 60}\n")
 
 
 # ── Session cache ─────────────────────────────────────────────────────────────
@@ -307,7 +290,7 @@ def _save_session_cache(sessions: dict[str, BankSession]) -> None:
         json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8"
     )
     if sys.platform != "win32":
-        _CACHE_DIR.chmod(0o700)   # rwx------  (owner only)
+        _CACHE_DIR.chmod(0o700)  # rwx------  (owner only)
         _CACHE_FILE.chmod(0o600)  # rw-------  (owner only)
     print(f"Session cache updated → {_CACHE_FILE}")
 
@@ -317,7 +300,7 @@ def _save_session_cache(sessions: dict[str, BankSession]) -> None:
 
 def main() -> None:
     """Run the CLI."""
-    import persfin.main as _persfin_main
+    store = get_store()
 
     # 1. Load all cached bank sessions (both valid and expired)
     all_cached = _load_session_cache()
@@ -326,7 +309,7 @@ def main() -> None:
 
     # 2. Inject valid sessions into the in-memory store
     for bs in valid.values():
-        _persfin_main._sessions[bs.session_id] = bs.to_session_response()
+        store.put(bs.to_session_response())
 
     # 3. Determine which banks need (re-)authentication
     if not all_cached:
@@ -352,7 +335,7 @@ def main() -> None:
         _start_server_thread()
 
         for aspsp_name, aspsp_country in banks_to_auth:
-            known_ids = set(_persfin_main._sessions.keys())
+            known_ids = store.ids()
             auth_url = start_auth(aspsp_name=aspsp_name, aspsp_country=aspsp_country)
 
             print(f"\nOpening browser for {aspsp_name}…")
@@ -365,7 +348,8 @@ def main() -> None:
             webbrowser.open(auth_url)
 
             new_session_id = _wait_for_new_session(known_ids, timeout=600)
-            new_session = _persfin_main._sessions[new_session_id]
+            new_session = store.get(new_session_id)
+            assert new_session is not None
 
             valid_until = datetime.now(UTC) + timedelta(days=_SESSION_VALIDITY_DAYS)
             key = _cache_key(aspsp_name, aspsp_country)
@@ -383,13 +367,8 @@ def main() -> None:
 
         _save_session_cache(all_cached)
 
-    # 5. Print a summary across all sessions
-    _print_session_summary()
-
-    # 6. Export all transactions to CSV files
-    print("\nExporting transactions to CSV…")
-    _export_transactions_to_csv()
-    print("Done.")
+    # 5. Fetch, display, and export transactions
+    _export_transactions_to_csv(store.all())
 
 
 if __name__ == "__main__":

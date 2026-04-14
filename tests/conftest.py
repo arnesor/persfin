@@ -1,24 +1,23 @@
 """Shared pytest configuration and fixtures for persfin tests.
 
-The os.environ lines must appear before any persfin import so that
-pydantic-settings' Settings() instantiation (which happens at module import
-time) can satisfy its required fields without a real .env file.
+Why the os.environ lines are here:
+    get_settings() is @lru_cache and is only called when a request actually
+    reaches enablebanking code.  All network calls are mocked in the test suite,
+    so get_settings() is never truly invoked.  The env vars are a safety net for
+    any path that might slip through and try to instantiate Settings().
 """
 
 import os
 
-# Provide stub values so Settings() validates on import without a .env file.
-# The actual values are never used in tests because all network calls are mocked.
 os.environ.setdefault("APP_ID", "test-app-id")
 os.environ.setdefault("PEM_FILE", "dummy.pem")
 
-from datetime import UTC, datetime, timedelta  # noqa: E402
 
-import pytest  # noqa: E402
-from fastapi.testclient import TestClient  # noqa: E402
+import pytest
+from fastapi.testclient import TestClient
 
-from persfin.models import AccountIdentification, AccountRef, SessionResponse  # noqa: E402
-
+from persfin.main import SessionStore, app, get_store
+from persfin.models import AccountIdentification, AccountRef, SessionResponse
 
 # ── Reusable model fixtures ───────────────────────────────────────────────────
 
@@ -44,24 +43,22 @@ def fake_session(fake_account: AccountRef) -> SessionResponse:
 @pytest.fixture()
 def client() -> TestClient:
     """A synchronous FastAPI TestClient backed by the persfin app."""
-    from persfin.main import app  # local import keeps module order safe
-
     return TestClient(app, raise_server_exceptions=True)
 
 
 @pytest.fixture()
 def authed_client(
-    client: TestClient, fake_session: SessionResponse
+    client: TestClient,
+    fake_session: SessionResponse,
+    fresh_store: SessionStore,
 ) -> TestClient:
-    """A TestClient with a valid session already injected and its cookie set.
+    """A TestClient with a valid session already stored and its cookie set.
 
-    Injects ``fake_session`` into ``persfin.main._sessions`` and sets the
-    ``session_id`` cookie directly on the client instance so no per-request
-    ``cookies=`` argument is needed (which Starlette has deprecated).
+    Puts ``fake_session`` into ``fresh_store`` (which is already wired as the
+    DI override for ``get_store``) and sets the ``session_id`` cookie on the
+    client instance.
     """
-    import persfin.main as m
-
-    m._sessions[fake_session.session_id] = fake_session
+    fresh_store.put(fake_session)
     client.cookies.set("session_id", fake_session.session_id)
     return client
 
@@ -70,10 +67,15 @@ def authed_client(
 
 
 @pytest.fixture(autouse=True)
-def clear_sessions() -> None:
-    """Clear the in-memory session store before and after every test."""
-    import persfin.main as m
+def fresh_store() -> SessionStore:
+    """Provide a clean, isolated SessionStore for each test.
 
-    m._sessions.clear()
-    yield
-    m._sessions.clear()
+    Overrides the ``get_store`` dependency so every request handled by the
+    TestClient uses a fresh store, without touching the module-level ``_store``
+    at all.  The override is removed in teardown so it does not bleed into
+    subsequent tests.
+    """
+    store = SessionStore()
+    app.dependency_overrides[get_store] = lambda: store
+    yield store
+    app.dependency_overrides.pop(get_store, None)

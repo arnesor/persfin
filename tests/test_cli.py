@@ -16,7 +16,6 @@ import pytest
 from persfin.cli import _cache_key, _load_session_cache, _save_session_cache
 from persfin.models import AccountRef, BankSession
 
-
 # ── Fixtures ──────────────────────────────────────────────────────────────────
 
 
@@ -73,9 +72,7 @@ class TestCacheKey:
 
 
 class TestLoadSessionCache:
-    def test_returns_empty_dict_when_file_missing(
-        self, cache_file: Path
-    ) -> None:
+    def test_returns_empty_dict_when_file_missing(self, cache_file: Path) -> None:
         assert not cache_file.exists()
         assert _load_session_cache() == {}
 
@@ -102,7 +99,9 @@ class TestLoadSessionCache:
         expired_bank_session: BankSession,
     ) -> None:
         key1 = _cache_key(bank_session.aspsp_name, bank_session.aspsp_country)
-        key2 = _cache_key(expired_bank_session.aspsp_name, expired_bank_session.aspsp_country)
+        key2 = _cache_key(
+            expired_bank_session.aspsp_name, expired_bank_session.aspsp_country
+        )
         cache_file.write_text(
             json.dumps(
                 {
@@ -183,7 +182,9 @@ class TestSaveSessionCache:
         expired_bank_session: BankSession,
     ) -> None:
         key1 = _cache_key(bank_session.aspsp_name, bank_session.aspsp_country)
-        key2 = _cache_key(expired_bank_session.aspsp_name, expired_bank_session.aspsp_country)
+        key2 = _cache_key(
+            expired_bank_session.aspsp_name, expired_bank_session.aspsp_country
+        )
 
         _save_session_cache({key1: bank_session})
         _save_session_cache({key2: expired_bank_session})  # second write replaces first

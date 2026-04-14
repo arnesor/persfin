@@ -9,7 +9,6 @@ from persfin.models import (
     SessionResponse,
 )
 
-
 # ── AccountRef.display_name ───────────────────────────────────────────────────
 
 

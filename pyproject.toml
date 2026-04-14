@@ -59,6 +59,7 @@ ignore = [
     "ANN401", # Allow type annotation with type Any.
     "D100",   # Supress undocumented-public-module. Only doc of public api required.
     "D101",   # Supress undocumented-public-class for generated code.
+    "D105",   # Supress undocumented-magic-method.
     "E741",   # Supress ambiguous variable name for generated code.
     "FBT001", # Allow boolean positional arguments in a function.
     "FBT002", # Allow boolean default positional arguments in a function.
