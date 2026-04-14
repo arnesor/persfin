@@ -82,7 +82,7 @@ def create_session(code: str) -> SessionResponse:
 
 def get_balances(account_uid: str) -> BalancesResponse:
     """Return balances for the given account UID."""
-    with httpx.Client() as client:
+    with httpx.Client(timeout=30.0) as client:
         response = client.get(
             f"{settings.api_origin}/accounts/{account_uid}/balances",
             headers=_auth_headers(),
@@ -107,7 +107,7 @@ def get_transactions(
     if continuation_key:
         params["continuation_key"] = continuation_key
 
-    with httpx.Client() as client:
+    with httpx.Client(timeout=60.0) as client:
         response = client.get(
             f"{settings.api_origin}/accounts/{account_uid}/transactions",
             params=params,

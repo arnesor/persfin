@@ -91,9 +91,11 @@ class SessionResponse(BaseModel):
     accounts: list[AccountRef]
 
 
-class CachedSession(BaseModel):
-    """Session persisted to disk so re-authentication can be skipped."""
+class BankSession(BaseModel):
+    """A cached session for a single bank, persisted to disk."""
 
+    aspsp_name: str
+    aspsp_country: str
     session_id: str
     accounts: list[AccountRef]
     valid_until: datetime
@@ -103,7 +105,7 @@ class CachedSession(BaseModel):
         return datetime.now(UTC) < self.valid_until
 
     def to_session_response(self) -> SessionResponse:
-        """Convert back to a plain SessionResponse for use in the app."""
+        """Convert to a plain SessionResponse for use in the app."""
         return SessionResponse(session_id=self.session_id, accounts=self.accounts)
 
 
