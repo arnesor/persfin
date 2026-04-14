@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 
 from pydantic import BaseModel, computed_field
@@ -89,6 +89,24 @@ class AccountRef(BaseModel):
 class SessionResponse(BaseModel):
     session_id: str
     accounts: list[AccountRef]
+
+
+class BankSession(BaseModel):
+    """A cached session for a single bank, persisted to disk."""
+
+    aspsp_name: str
+    aspsp_country: str
+    session_id: str
+    accounts: list[AccountRef]
+    valid_until: datetime
+
+    def is_valid(self) -> bool:
+        """Return True if this session has not expired yet."""
+        return datetime.now(UTC) < self.valid_until
+
+    def to_session_response(self) -> SessionResponse:
+        """Convert to a plain SessionResponse for use in the app."""
+        return SessionResponse(session_id=self.session_id, accounts=self.accounts)
 
 
 # ── Balances ─────────────────────────────────────────────────────────────────

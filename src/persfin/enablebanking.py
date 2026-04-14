@@ -6,7 +6,7 @@ from datetime import UTC, datetime, timedelta
 import httpx
 import jwt
 
-from persfin.config import settings
+from persfin.config import get_settings
 from persfin.models import (
     AspspsResponse,
     BalancesResponse,
@@ -17,7 +17,8 @@ from persfin.models import (
 
 def _make_jwt() -> str:
     """Create a signed JWT for Enable Banking API authentication."""
-    private_key = settings.pem_file.read_bytes()
+    s = get_settings()
+    private_key = s.pem_file.read_bytes()
     iat = int(datetime.now(UTC).timestamp())
     payload = {
         "iss": "enablebanking.com",
@@ -29,7 +30,7 @@ def _make_jwt() -> str:
         payload,
         private_key,
         algorithm="RS256",
-        headers={"kid": settings.app_id},
+        headers={"kid": s.app_id},
     )
 
 
@@ -41,7 +42,7 @@ def get_aspsps(country: str = "NO") -> AspspsResponse:
     """Fetch the list of available ASPSPs for a given country."""
     with httpx.Client() as client:
         response = client.get(
-            f"{settings.api_origin}/aspsps",
+            f"{get_settings().api_origin}/aspsps",
             params={"country": country},
             headers=_auth_headers(),
         )
@@ -51,16 +52,17 @@ def get_aspsps(country: str = "NO") -> AspspsResponse:
 
 def start_auth(aspsp_name: str, aspsp_country: str) -> str:
     """Start the authorisation flow for a bank and return the redirect URL."""
+    s = get_settings()
     body = {
-        "access": {"valid_until": (datetime.now(UTC) + timedelta(days=10)).isoformat()},
+        "access": {"valid_until": (datetime.now(UTC) + timedelta(days=90)).isoformat()},
         "aspsp": {"name": aspsp_name, "country": aspsp_country},
         "state": str(uuid.uuid4()),
-        "redirect_url": settings.redirect_url,
+        "redirect_url": s.redirect_url,
         "psu_type": "personal",
     }
     with httpx.Client() as client:
         response = client.post(
-            f"{settings.api_origin}/auth",
+            f"{s.api_origin}/auth",
             json=body,
             headers=_auth_headers(),
         )
@@ -72,7 +74,7 @@ def create_session(code: str) -> SessionResponse:
     """Exchange the authorisation code for a session."""
     with httpx.Client() as client:
         response = client.post(
-            f"{settings.api_origin}/sessions",
+            f"{get_settings().api_origin}/sessions",
             json={"code": code},
             headers=_auth_headers(),
         )
@@ -82,9 +84,9 @@ def create_session(code: str) -> SessionResponse:
 
 def get_balances(account_uid: str) -> BalancesResponse:
     """Return balances for the given account UID."""
-    with httpx.Client() as client:
+    with httpx.Client(timeout=30.0) as client:
         response = client.get(
-            f"{settings.api_origin}/accounts/{account_uid}/balances",
+            f"{get_settings().api_origin}/accounts/{account_uid}/balances",
             headers=_auth_headers(),
         )
         response.raise_for_status()
@@ -107,9 +109,9 @@ def get_transactions(
     if continuation_key:
         params["continuation_key"] = continuation_key
 
-    with httpx.Client() as client:
+    with httpx.Client(timeout=60.0) as client:
         response = client.get(
-            f"{settings.api_origin}/accounts/{account_uid}/transactions",
+            f"{get_settings().api_origin}/accounts/{account_uid}/transactions",
             params=params,
             headers=_auth_headers(),
         )
