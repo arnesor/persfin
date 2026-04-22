@@ -36,6 +36,8 @@ from persfin.models import BankSession, SessionResponse
 
 _CACHE_DIR = Path.home() / ".persfin"
 _SESSION_VALIDITY_DAYS = 90
+# Project root is three levels above this file: src/persfin/cli.py -> project root
+_DATA_DIR = Path(__file__).parent.parent.parent / "data"
 
 
 def _cache_file() -> Path:
@@ -384,7 +386,7 @@ def main() -> None:
         _save_session_cache(all_cached)
 
     # 5. Fetch, display, and export transactions
-    _export_transactions_to_csv(store.all())
+    _export_transactions_to_csv(store.all(), output_dir=_DATA_DIR)
 
 
 if __name__ == "__main__":
