@@ -8,7 +8,7 @@ Flow (first run):
     2. Prompts the user to pick one or more banks.
     3. For each bank: opens the OAuth login URL in the browser and waits for
        the /callback redirect via a local FastAPI server.
-    4. Saves all sessions to ~/.persfin/session_cache.json (valid for 90 days).
+    4. Saves all sessions to ~/.persfin/session_cache_<app_id>.json (valid for 90 days).
     5. Prints account balances and exports transactions to CSV.
 
 Subsequent runs:
@@ -35,8 +35,22 @@ from persfin.models import BankSession, SessionResponse
 # ── Constants ─────────────────────────────────────────────────────────────────
 
 _CACHE_DIR = Path.home() / ".persfin"
-_CACHE_FILE = _CACHE_DIR / "session_cache.json"
 _SESSION_VALIDITY_DAYS = 90
+
+
+def _cache_file() -> Path:
+    """Return the session cache path for the current APP_ID.
+
+    Each APP_ID gets its own file, e.g.:
+        ~/.persfin/session_cache_77521a6a-5a1e-44a7-9044-c84a214b6153.json
+
+    This lets you switch between prod and sandbox APP_IDs in .env without
+    losing the other environment's cached sessions.
+    """
+    from persfin.config import get_settings
+
+    app_id = get_settings().app_id
+    return _CACHE_DIR / f"session_cache_{app_id}.json"
 
 
 def _cache_key(aspsp_name: str, aspsp_country: str) -> str:
@@ -262,15 +276,16 @@ def _export_transactions_to_csv(
 
 
 def _load_session_cache() -> dict[str, BankSession]:
-    """Load all BankSessions from the cache file (valid *and* expired).
+    """Load all BankSessions from the APP_ID-specific cache file (valid *and* expired).
 
     Returns an empty dict if the file is missing or unreadable.
     Keys are ``"<aspsp_name>|<aspsp_country>"``.
     """
-    if not _CACHE_FILE.exists():
+    cache_file = _cache_file()
+    if not cache_file.exists():
         return {}
     try:
-        raw: dict = json.loads(_CACHE_FILE.read_text(encoding="utf-8"))
+        raw: dict = json.loads(cache_file.read_text(encoding="utf-8"))
         return {k: BankSession.model_validate(v) for k, v in raw.items()}
     except Exception as exc:
         print(f"Could not read session cache ({exc}) — starting fresh.")
@@ -278,21 +293,22 @@ def _load_session_cache() -> dict[str, BankSession]:
 
 
 def _save_session_cache(sessions: dict[str, BankSession]) -> None:
-    """Persist all BankSessions to disk.
+    """Persist all BankSessions to the APP_ID-specific cache file on disk.
 
     On Linux/macOS the cache directory is created with permissions 0o700 and the
     file with 0o600 so that only the owning user can read the session tokens.
     Windows does not support POSIX permission bits, so the chmod calls are skipped.
     """
+    cache_file = _cache_file()
     _CACHE_DIR.mkdir(parents=True, exist_ok=True)
     data = {k: json.loads(v.model_dump_json()) for k, v in sessions.items()}
-    _CACHE_FILE.write_text(
+    cache_file.write_text(
         json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8"
     )
     if sys.platform != "win32":
         _CACHE_DIR.chmod(0o700)  # rwx------  (owner only)
-        _CACHE_FILE.chmod(0o600)  # rw-------  (owner only)
-    print(f"Session cache updated → {_CACHE_FILE}")
+        cache_file.chmod(0o600)  # rw-------  (owner only)
+    print(f"Session cache updated → {cache_file}")
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────
