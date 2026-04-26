@@ -16,8 +16,9 @@ os.environ.setdefault("PEM_FILE", "dummy.pem")
 import pytest
 from fastapi.testclient import TestClient
 
-from persfin.main import SessionStore, app, get_store
-from persfin.models import AccountIdentification, AccountRef, SessionResponse
+from persfin.core.session_store import SessionStore, get_store
+from persfin.main import app
+from persfin.schemas.schemas import AccountIdentification, AccountRef, SessionResponse
 
 # ── Reusable model fixtures ───────────────────────────────────────────────────
 

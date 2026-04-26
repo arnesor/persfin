@@ -8,7 +8,7 @@ Flow (first run):
     2. Prompts the user to pick one or more banks.
     3. For each bank: opens the OAuth login URL in the browser and waits for
        the /callback redirect via a local FastAPI server.
-    4. Saves all sessions to ~/.persfin/session_cache_<app_id>.json (valid for 90 days).
+    4. Saves all sessions to ~/.persfin/session_cache_<app_id>.json.
     5. Prints account balances and exports transactions to CSV.
 
 Subsequent runs:
@@ -24,23 +24,29 @@ import time
 import webbrowser
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import NamedTuple
 
 import polars as pl
 import uvicorn
 
-from persfin.enablebanking import get_aspsps, get_balances, get_transactions, start_auth
-from persfin.main import app, get_store
-from persfin.models import BankSession, SessionResponse
+from persfin.core.session_store import get_store
+from persfin.main import app
+from persfin.schemas.schemas import BankSession, SessionResponse
+from persfin.services.enablebanking import (
+    get_aspsps,
+    get_balances,
+    get_transactions,
+    start_auth,
+)
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 
 _CACHE_DIR = Path.home() / ".persfin"
-_SESSION_VALIDITY_DAYS = 90
 # Project root is three levels above this file: src/persfin/cli.py -> project root
 _DATA_DIR = Path(__file__).parent.parent.parent / "data"
 
 
-def _cache_file() -> Path:
+def _make_cache_file() -> Path:
     """Return the session cache path for the current APP_ID.
 
     Each APP_ID gets its own file, e.g.:
@@ -49,10 +55,14 @@ def _cache_file() -> Path:
     This lets you switch between prod and sandbox APP_IDs in .env without
     losing the other environment's cached sessions.
     """
-    from persfin.config import get_settings
+    from persfin.core.config import get_settings
 
     app_id = get_settings().app_id
     return _CACHE_DIR / f"session_cache_{app_id}.json"
+
+
+# Resolved once at import time so tests can override it with monkeypatch.setattr.
+_CACHE_FILE: Path = _make_cache_file()
 
 
 def _cache_key(aspsp_name: str, aspsp_country: str) -> str:
@@ -60,13 +70,25 @@ def _cache_key(aspsp_name: str, aspsp_country: str) -> str:
     return f"{aspsp_name}|{aspsp_country}"
 
 
+class BankToAuth(NamedTuple):
+    """A bank that needs (re-)authentication."""
+
+    aspsp_name: str
+    aspsp_country: str
+    maximum_consent_validity: int | None  # seconds, or None to use the default
+
+
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 
-def _prompt_bank_multi_selection(country: str = "NO") -> list[tuple[str, str]]:
+def _prompt_bank_multi_selection(
+    country: str = "NO",
+) -> list[BankToAuth]:
     """Fetch ASPSPs for *country* and let the user pick one or more banks.
 
-    Returns a list of ``(name, country)`` tuples in the order selected.
+    Returns a list of :class:`BankToAuth` in the order selected.
+    ``maximum_consent_validity`` is in seconds, or ``None`` if the ASPSP
+    does not advertise a limit.
     """
     print(f"\nFetching available banks for country '{country}'…")
     response = get_aspsps(country=country)
@@ -95,15 +117,21 @@ def _prompt_bank_multi_selection(country: str = "NO") -> list[tuple[str, str]]:
             continue
         if all(1 <= idx <= len(banks) for idx in indices):
             seen: set[int] = set()
-            selected: list[tuple[str, str]] = []
+            selected: list[BankToAuth] = []
             for idx in indices:
                 if idx not in seen:
                     seen.add(idx)
                     bank = banks[idx - 1]
-                    selected.append((bank.name, bank.country))
+                    selected.append(
+                        BankToAuth(
+                            aspsp_name=bank.name,
+                            aspsp_country=bank.country,
+                            maximum_consent_validity=bank.maximum_consent_validity,
+                        )
+                    )
             print("\n→ Selected bank(s):")
-            for name, cty in selected:
-                print(f"    - {name} ({cty})")
+            for b in selected:
+                print(f"    - {b.aspsp_name} ({b.aspsp_country})")
             return selected
         print(f"  Please enter numbers between 1 and {len(banks)}.")
 
@@ -283,7 +311,7 @@ def _load_session_cache() -> dict[str, BankSession]:
     Returns an empty dict if the file is missing or unreadable.
     Keys are ``"<aspsp_name>|<aspsp_country>"``.
     """
-    cache_file = _cache_file()
+    cache_file = _CACHE_FILE
     if not cache_file.exists():
         return {}
     try:
@@ -301,7 +329,7 @@ def _save_session_cache(sessions: dict[str, BankSession]) -> None:
     file with 0o600 so that only the owning user can read the session tokens.
     Windows does not support POSIX permission bits, so the chmod calls are skipped.
     """
-    cache_file = _cache_file()
+    cache_file = _CACHE_FILE
     _CACHE_DIR.mkdir(parents=True, exist_ok=True)
     data = {k: json.loads(v.model_dump_json()) for k, v in sessions.items()}
     cache_file.write_text(
@@ -341,7 +369,10 @@ def main() -> None:
         )
         for bs in expired.values():
             print(f"  - {bs.aspsp_name} ({bs.aspsp_country})")
-        banks_to_auth = [(bs.aspsp_name, bs.aspsp_country) for bs in expired.values()]
+        banks_to_auth = [
+            BankToAuth(bs.aspsp_name, bs.aspsp_country, None)
+            for bs in expired.values()
+        ]
     else:
         # All sessions are valid — nothing to do
         count = len(valid)
@@ -352,35 +383,38 @@ def main() -> None:
     if banks_to_auth:
         _start_server_thread()
 
-        for aspsp_name, aspsp_country in banks_to_auth:
+        for bank in banks_to_auth:
             known_ids = store.ids()
-            auth_url = start_auth(aspsp_name=aspsp_name, aspsp_country=aspsp_country)
+            auth_result = start_auth(
+                aspsp_name=bank.aspsp_name,
+                aspsp_country=bank.aspsp_country,
+                maximum_consent_validity=bank.maximum_consent_validity,
+            )
 
-            print(f"\nOpening browser for {aspsp_name}…")
-            print(f"  URL: {auth_url}")
-            if aspsp_name == "Mock ASPSP":
+            print(f"\nOpening browser for {bank.aspsp_name}…")
+            print(f"  URL: {auth_result.url}")
+            if bank.aspsp_name == "Mock ASPSP":
                 print(
                     "  (Mock ASPSP: make sure you are signed in at enablebanking.com)"
                 )
             print("  Waiting up to 10 minutes for you to complete the login…")
-            webbrowser.open(auth_url)
+            webbrowser.open(auth_result.url)
 
             new_session_id = _wait_for_new_session(known_ids, timeout=600)
             new_session = store.get(new_session_id)
             assert new_session is not None
 
-            valid_until = datetime.now(UTC) + timedelta(days=_SESSION_VALIDITY_DAYS)
-            key = _cache_key(aspsp_name, aspsp_country)
+            key = _cache_key(bank.aspsp_name, bank.aspsp_country)
             all_cached[key] = BankSession(
-                aspsp_name=aspsp_name,
-                aspsp_country=aspsp_country,
+                aspsp_name=bank.aspsp_name,
+                aspsp_country=bank.aspsp_country,
                 session_id=new_session.session_id,
                 accounts=new_session.accounts,
-                valid_until=valid_until,
+                valid_until=auth_result.valid_until,
             )
             print(
-                f"  ✓ Authenticated with {aspsp_name}"
-                f" (session valid until {valid_until.date()})"
+                f"  ✓ Authenticated with {bank.aspsp_name}"
+                f" (session valid until {auth_result.valid_until.date()})"
             )
 
         _save_session_cache(all_cached)

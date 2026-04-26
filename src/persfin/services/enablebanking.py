@@ -6,9 +6,10 @@ from datetime import UTC, datetime, timedelta
 import httpx
 import jwt
 
-from persfin.config import get_settings
-from persfin.models import (
+from persfin.core.config import get_settings
+from persfin.schemas.schemas import (
     AspspsResponse,
+    AuthStartResult,
     BalancesResponse,
     SessionResponse,
     TransactionsResponse,
@@ -35,6 +36,7 @@ def _make_jwt() -> str:
 
 
 def _auth_headers() -> dict[str, str]:
+    """Return Authorization headers with a freshly signed JWT."""
     return {"Authorization": f"Bearer {_make_jwt()}"}
 
 
@@ -50,11 +52,38 @@ def get_aspsps(country: str = "NO") -> AspspsResponse:
         return AspspsResponse.model_validate(response.json())
 
 
-def start_auth(aspsp_name: str, aspsp_country: str) -> str:
-    """Start the authorisation flow for a bank and return the redirect URL."""
+def start_auth(
+    aspsp_name: str,
+    aspsp_country: str,
+    maximum_consent_validity: int | None = None,
+) -> AuthStartResult:
+    """Start the authorisation flow for a bank.
+
+    Computes and sends the consent ``valid_until`` capped to the bank's
+    ``maximum_consent_validity`` (if known). Returns the redirect URL together
+    with the exact ``valid_until`` datetime that was sent, so callers can store
+    it precisely rather than recomputing it independently.
+
+    Args:
+        aspsp_name: ASPSP name as returned by ``GET /aspsps``.
+        aspsp_country: ISO 3166 two-letter country code.
+        maximum_consent_validity: Maximum consent duration in seconds as
+            reported by the ASPSP, or ``None`` to default to 90 days.
+
+    Returns:
+        An :class:`AuthStartResult` with the bank redirect URL and the
+        exact ``valid_until`` datetime used in the consent request.
+    """
     s = get_settings()
+    if maximum_consent_validity is not None:
+        max_delta = timedelta(seconds=maximum_consent_validity)
+        default_delta = timedelta(days=90)
+        delta = min(max_delta, default_delta)
+    else:
+        delta = timedelta(days=90)
+    valid_until = datetime.now(UTC) + delta
     body = {
-        "access": {"valid_until": (datetime.now(UTC) + timedelta(days=90)).isoformat()},
+        "access": {"valid_until": valid_until.isoformat()},
         "aspsp": {"name": aspsp_name, "country": aspsp_country},
         "state": str(uuid.uuid4()),
         "redirect_url": s.redirect_url,
@@ -67,7 +96,7 @@ def start_auth(aspsp_name: str, aspsp_country: str) -> str:
             headers=_auth_headers(),
         )
         response.raise_for_status()
-        return response.json()["url"]
+        return AuthStartResult(url=response.json()["url"], valid_until=valid_until)
 
 
 def create_session(code: str) -> SessionResponse:
@@ -100,8 +129,13 @@ def get_transactions(
 ) -> TransactionsResponse:
     """Return transactions for the given account UID.
 
-    `date_from` should be an ISO 8601 date string (YYYY-MM-DD).
-    If `continuation_key` is provided it will be forwarded to page through results.
+    Args:
+        account_uid: The unique account identifier.
+        date_from: ISO 8601 date string (YYYY-MM-DD) for the start of the range.
+        continuation_key: Pagination key from a previous response.
+
+    Returns:
+        A ``TransactionsResponse`` with transactions and an optional continuation key.
     """
     params: dict[str, str] = {}
     if date_from:

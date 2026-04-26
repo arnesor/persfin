@@ -14,7 +14,7 @@ from pathlib import Path
 import pytest
 
 from persfin.cli import _cache_key, _load_session_cache, _save_session_cache
-from persfin.models import AccountRef, BankSession
+from persfin.schemas.schemas import AccountRef, BankSession
 
 # ── Fixtures ──────────────────────────────────────────────────────────────────
 

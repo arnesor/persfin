@@ -1,34 +1,56 @@
+"""All Pydantic schemas for persfin — request/response and domain models."""
+
 from datetime import UTC, datetime
 from typing import Any
 
 from pydantic import BaseModel, computed_field
 
-# ── ASPSP ────────────────────────────────────────────────────────────────────
+# ── ASPSP ─────────────────────────────────────────────────────────────────────
 
 
 class Aspsp(BaseModel):
+    """A single bank / ASPSP entry."""
+
     name: str
     country: str
     logo: str | None = None
+    maximum_consent_validity: int | None = None  # seconds; None means no known limit
 
 
 class AspspsResponse(BaseModel):
+    """Response wrapper for the list of ASPSPs."""
+
     aspsps: list[Aspsp]
 
 
-# ── Auth ─────────────────────────────────────────────────────────────────────
+# ── Auth ──────────────────────────────────────────────────────────────────────
 
 
 class AuthRequest(BaseModel):
+    """Request body for POST /connect."""
+
     aspsp_name: str
     aspsp_country: str
 
 
 class AuthStartResponse(BaseModel):
+    """Response body for a successful auth start."""
+
     url: str
 
 
-# ── Session ──────────────────────────────────────────────────────────────────
+class AuthStartResult(BaseModel):
+    """Internal result of ``start_auth``.
+
+    Carries the bank redirect URL and the exact consent expiry that was
+    sent to Enable Banking, so callers can store it precisely.
+    """
+
+    url: str
+    valid_until: datetime
+
+
+# ── Account ───────────────────────────────────────────────────────────────────
 
 
 class AccountIdentification(BaseModel):
@@ -46,6 +68,8 @@ class GenericIdentification(BaseModel):
 
 
 class ClearingSystemMemberId(BaseModel):
+    """Clearing system member identifier."""
+
     clearing_system_id: str | None = None
     member_id: Any | None = None
 
@@ -86,7 +110,12 @@ class AccountRef(BaseModel):
         return self.uid
 
 
+# ── Session ───────────────────────────────────────────────────────────────────
+
+
 class SessionResponse(BaseModel):
+    """Active bank session returned by the Enable Banking API."""
+
     session_id: str
     accounts: list[AccountRef]
 
@@ -109,15 +138,19 @@ class BankSession(BaseModel):
         return SessionResponse(session_id=self.session_id, accounts=self.accounts)
 
 
-# ── Balances ─────────────────────────────────────────────────────────────────
+# ── Balances ──────────────────────────────────────────────────────────────────
 
 
 class Amount(BaseModel):
+    """A monetary amount with a currency code."""
+
     amount: str
     currency: str
 
 
 class Balance(BaseModel):
+    """A single balance entry for an account."""
+
     name: str | None = None
     balance_amount: Amount
     balance_type: str | None = None
@@ -127,13 +160,17 @@ class Balance(BaseModel):
 
 
 class BalancesResponse(BaseModel):
+    """Response wrapper for account balances."""
+
     balances: list[Balance]
 
 
-# ── Transactions ─────────────────────────────────────────────────────────────
+# ── Transactions ──────────────────────────────────────────────────────────────
 
 
 class Transaction(BaseModel):
+    """A single bank transaction."""
+
     transaction_id: str | None = None
     entry_reference: str | None = None
     booking_date: str | None = None
@@ -151,5 +188,7 @@ class Transaction(BaseModel):
 
 
 class TransactionsResponse(BaseModel):
+    """Response wrapper for account transactions, with optional pagination key."""
+
     transactions: list[Transaction]
     continuation_key: str | None = None
