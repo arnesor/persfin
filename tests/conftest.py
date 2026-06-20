@@ -13,11 +13,13 @@ os.environ.setdefault("APP_ID", "test-app-id")
 os.environ.setdefault("PEM_FILE", "dummy.pem")
 
 
+from collections.abc import Generator
 import pytest
 from fastapi.testclient import TestClient
 
-from persfin.main import SessionStore, app, get_store
-from persfin.models import AccountIdentification, AccountRef, SessionResponse
+from persfin.core.session_store import SessionStore, get_store
+from persfin.main import app
+from persfin.schemas.schemas import AccountIdentification, AccountRef, SessionResponse
 
 # ── Reusable model fixtures ───────────────────────────────────────────────────
 
@@ -67,7 +69,7 @@ def authed_client(
 
 
 @pytest.fixture(autouse=True)
-def fresh_store() -> SessionStore:
+def fresh_store() -> Generator[SessionStore, None, None]:
     """Provide a clean, isolated SessionStore for each test.
 
     Overrides the ``get_store`` dependency so every request handled by the

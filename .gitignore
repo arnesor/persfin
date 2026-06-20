@@ -211,3 +211,6 @@ firefly/.env
 firefly/.importer.env
 firefly/.db.env
 *.pem
+
+# Data
+*.csv

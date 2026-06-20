@@ -191,12 +191,18 @@ curl "https://localhost:8000/accounts/<account_uid>/transactions?continuation_ke
 
 ```
 src/persfin/
-├── __init__.py          # package entry point
-├── cli.py               # interactive CLI (bank picker + transaction printer)
-├── config.py            # settings (pydantic-settings + .env)
-├── enablebanking.py     # Enable Banking API client (httpx + JWT)
-├── models.py            # Pydantic response models
-└── main.py              # FastAPI application
+├── main.py                  # slim: app + exception handler + router includes
+├── schemas.py               # all Pydantic models in one file
+├── core/
+│   ├── config.py            # pydantic-settings (was persfin/config.py)
+│   └── session_store.py     # SessionStore + get_store + StoreDep (was in main.py)
+├── services/
+│   └── enablebanking.py     # HTTP client (was persfin/enablebanking.py)
+└── api/
+    ├── banks.py             # GET /banks
+    ├── auth.py              # POST /connect, GET /callback
+    └── accounts.py          # GET /accounts + balances + transactions
+
 ```
 
 ## Development

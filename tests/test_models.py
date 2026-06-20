@@ -1,8 +1,8 @@
-"""Unit tests for persfin.models."""
+"""Unit tests for persfin.schemas."""
 
 from datetime import UTC, datetime, timedelta
 
-from persfin.models import (
+from persfin.schemas.schemas import (
     AccountIdentification,
     AccountRef,
     BankSession,

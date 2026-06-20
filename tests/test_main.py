@@ -12,16 +12,19 @@ Key patterns:
 """
 
 import re
+from datetime import UTC, datetime, timedelta
 
 import httpx
 import pytest
+from pytest_mock import MockerFixture
 from fastapi.testclient import TestClient
 
-from persfin.main import SessionStore
-from persfin.models import (
+from persfin.core.session_store import SessionStore
+from persfin.schemas.schemas import (
     Amount,
     Aspsp,
     AspspsResponse,
+    AuthStartResult,
     Balance,
     BalancesResponse,
     SessionResponse,
@@ -85,10 +88,10 @@ class TestSessionStore:
 
 class TestListBanks:
     def test_returns_bank_list(
-        self, client: TestClient, mocker: pytest.MonkeyPatch
+        self, client: TestClient, mocker: MockerFixture
     ) -> None:
         mocker.patch(
-            "persfin.main.get_aspsps",
+            "persfin.api.banks.get_aspsps",
             return_value=AspspsResponse(aspsps=[Aspsp(name="TestBank", country="NO")]),
         )
 
@@ -101,10 +104,10 @@ class TestListBanks:
         assert body["aspsps"][0]["country"] == "NO"
 
     def test_uses_no_as_default_country(
-        self, client: TestClient, mocker: pytest.MonkeyPatch
+        self, client: TestClient, mocker: MockerFixture
     ) -> None:
         mock = mocker.patch(
-            "persfin.main.get_aspsps",
+            "persfin.api.banks.get_aspsps",
             return_value=AspspsResponse(aspsps=[]),
         )
 
@@ -113,10 +116,10 @@ class TestListBanks:
         mock.assert_called_once_with(country="NO")
 
     def test_upstream_error_returns_502(
-        self, client: TestClient, mocker: pytest.MonkeyPatch
+        self, client: TestClient, mocker: MockerFixture
     ) -> None:
         mocker.patch(
-            "persfin.main.get_aspsps", side_effect=httpx.HTTPError("upstream down")
+            "persfin.api.banks.get_aspsps", side_effect=httpx.HTTPError("upstream down")
         )
 
         response = client.get("/banks")
@@ -130,11 +133,14 @@ class TestListBanks:
 
 class TestConnect:
     def test_returns_auth_url(
-        self, client: TestClient, mocker: pytest.MonkeyPatch
+        self, client: TestClient, mocker: MockerFixture
     ) -> None:
         mocker.patch(
-            "persfin.main.start_auth",
-            return_value="https://bank.example/auth?session=abc",
+            "persfin.api.auth.start_auth",
+            return_value=AuthStartResult(
+                url="https://bank.example/auth?session=abc",
+                valid_until=datetime.now(UTC) + timedelta(days=90),
+            ),
         )
 
         response = client.post(
@@ -146,9 +152,15 @@ class TestConnect:
         assert response.json() == {"url": "https://bank.example/auth?session=abc"}
 
     def test_passes_aspsp_fields_to_start_auth(
-        self, client: TestClient, mocker: pytest.MonkeyPatch
+        self, client: TestClient, mocker: MockerFixture
     ) -> None:
-        mock = mocker.patch("persfin.main.start_auth", return_value="https://x")
+        mock = mocker.patch(
+            "persfin.api.auth.start_auth",
+            return_value=AuthStartResult(
+                url="https://x",
+                valid_until=datetime.now(UTC) + timedelta(days=90),
+            ),
+        )
 
         client.post(
             "/connect",
@@ -158,10 +170,10 @@ class TestConnect:
         mock.assert_called_once_with(aspsp_name="DNB Bank", aspsp_country="NO")
 
     def test_upstream_error_returns_502(
-        self, client: TestClient, mocker: pytest.MonkeyPatch
+        self, client: TestClient, mocker: MockerFixture
     ) -> None:
         mocker.patch(
-            "persfin.main.start_auth", side_effect=httpx.HTTPError("bad request")
+            "persfin.api.auth.start_auth", side_effect=httpx.HTTPError("bad request")
         )
 
         response = client.post(
@@ -183,10 +195,10 @@ class TestCallback:
     def test_returns_html_on_success(
         self,
         client: TestClient,
-        mocker: pytest.MonkeyPatch,
+        mocker: MockerFixture,
         fake_session: SessionResponse,
     ) -> None:
-        mocker.patch("persfin.main.create_session", return_value=fake_session)
+        mocker.patch("persfin.api.auth.create_session", return_value=fake_session)
 
         response = client.get("/callback?code=auth-code-123")
 
@@ -197,11 +209,11 @@ class TestCallback:
     def test_stores_session_in_store(
         self,
         client: TestClient,
-        mocker: pytest.MonkeyPatch,
+        mocker: MockerFixture,
         fake_session: SessionResponse,
         fresh_store: SessionStore,
     ) -> None:
-        mocker.patch("persfin.main.create_session", return_value=fake_session)
+        mocker.patch("persfin.api.auth.create_session", return_value=fake_session)
 
         client.get("/callback?code=auth-code-123")
 
@@ -212,10 +224,10 @@ class TestCallback:
     def test_sets_session_cookie(
         self,
         client: TestClient,
-        mocker: pytest.MonkeyPatch,
+        mocker: MockerFixture,
         fake_session: SessionResponse,
     ) -> None:
-        mocker.patch("persfin.main.create_session", return_value=fake_session)
+        mocker.patch("persfin.api.auth.create_session", return_value=fake_session)
 
         response = client.get("/callback?code=auth-code-123")
 
@@ -223,10 +235,10 @@ class TestCallback:
         assert response.cookies["session_id"] == fake_session.session_id
 
     def test_upstream_error_returns_502(
-        self, client: TestClient, mocker: pytest.MonkeyPatch
+        self, client: TestClient, mocker: MockerFixture
     ) -> None:
         mocker.patch(
-            "persfin.main.create_session", side_effect=httpx.HTTPError("token expired")
+            "persfin.api.auth.create_session", side_effect=httpx.HTTPError("token expired")
         )
 
         response = client.get("/callback?code=bad-code")
@@ -274,10 +286,10 @@ class TestAccountBalances:
     def test_returns_balances(
         self,
         authed_client: TestClient,
-        mocker: pytest.MonkeyPatch,
+        mocker: MockerFixture,
     ) -> None:
         mocker.patch(
-            "persfin.main.get_balances",
+            "persfin.api.accounts.get_balances",
             return_value=BalancesResponse(
                 balances=[
                     Balance(
@@ -299,10 +311,10 @@ class TestAccountBalances:
     def test_passes_correct_account_uid(
         self,
         authed_client: TestClient,
-        mocker: pytest.MonkeyPatch,
+        mocker: MockerFixture,
     ) -> None:
         mock = mocker.patch(
-            "persfin.main.get_balances",
+            "persfin.api.accounts.get_balances",
             return_value=BalancesResponse(balances=[]),
         )
 
@@ -313,10 +325,10 @@ class TestAccountBalances:
     def test_upstream_error_returns_502(
         self,
         authed_client: TestClient,
-        mocker: pytest.MonkeyPatch,
+        mocker: MockerFixture,
     ) -> None:
         mocker.patch(
-            "persfin.main.get_balances", side_effect=httpx.HTTPError("timed out")
+            "persfin.api.accounts.get_balances", side_effect=httpx.HTTPError("timed out")
         )
 
         response = authed_client.get("/accounts/uid-abc123/balances")
@@ -335,10 +347,10 @@ class TestAccountTransactions:
     def test_returns_transactions(
         self,
         authed_client: TestClient,
-        mocker: pytest.MonkeyPatch,
+        mocker: MockerFixture,
     ) -> None:
         mocker.patch(
-            "persfin.main.get_transactions",
+            "persfin.api.accounts.get_transactions",
             return_value=TransactionsResponse(
                 transactions=[
                     Transaction(
@@ -360,10 +372,10 @@ class TestAccountTransactions:
     def test_forwards_custom_date_from(
         self,
         authed_client: TestClient,
-        mocker: pytest.MonkeyPatch,
+        mocker: MockerFixture,
     ) -> None:
         mock = mocker.patch(
-            "persfin.main.get_transactions",
+            "persfin.api.accounts.get_transactions",
             return_value=TransactionsResponse(transactions=[]),
         )
 
@@ -386,10 +398,10 @@ class TestAccountTransactions:
     def test_uses_90_day_default_when_date_not_specified(
         self,
         authed_client: TestClient,
-        mocker: pytest.MonkeyPatch,
+        mocker: MockerFixture,
     ) -> None:
         mock = mocker.patch(
-            "persfin.main.get_transactions",
+            "persfin.api.accounts.get_transactions",
             return_value=TransactionsResponse(transactions=[]),
         )
 
@@ -401,10 +413,10 @@ class TestAccountTransactions:
     def test_forwards_continuation_key(
         self,
         authed_client: TestClient,
-        mocker: pytest.MonkeyPatch,
+        mocker: MockerFixture,
     ) -> None:
         mock = mocker.patch(
-            "persfin.main.get_transactions",
+            "persfin.api.accounts.get_transactions",
             return_value=TransactionsResponse(transactions=[]),
         )
 
@@ -415,10 +427,10 @@ class TestAccountTransactions:
     def test_upstream_error_returns_502(
         self,
         authed_client: TestClient,
-        mocker: pytest.MonkeyPatch,
+        mocker: MockerFixture,
     ) -> None:
         mocker.patch(
-            "persfin.main.get_transactions",
+            "persfin.api.accounts.get_transactions",
             side_effect=httpx.HTTPError("connection reset"),
         )
 
