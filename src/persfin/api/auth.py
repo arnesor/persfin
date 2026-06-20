@@ -1,6 +1,7 @@
 """Auth router — POST /connect, GET /callback."""
 
 import logging
+from html import escape
 from typing import Annotated
 
 from fastapi import APIRouter, Query
@@ -53,7 +54,6 @@ def callback(
         session.session_id,
         len(session.accounts),
     )
-    from html import escape
     account_list = "".join(f"<li><code>{escape(a.uid)}</code></li>" for a in session.accounts)
     html = f"""
     <html><body>

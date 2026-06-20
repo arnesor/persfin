@@ -13,6 +13,7 @@ os.environ.setdefault("APP_ID", "test-app-id")
 os.environ.setdefault("PEM_FILE", "dummy.pem")
 
 
+from collections.abc import Generator
 import pytest
 from fastapi.testclient import TestClient
 
@@ -68,7 +69,7 @@ def authed_client(
 
 
 @pytest.fixture(autouse=True)
-def fresh_store() -> SessionStore:
+def fresh_store() -> Generator[SessionStore, None, None]:
     """Provide a clean, isolated SessionStore for each test.
 
     Overrides the ``get_store`` dependency so every request handled by the
