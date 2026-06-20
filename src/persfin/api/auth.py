@@ -53,17 +53,18 @@ def callback(
         session.session_id,
         len(session.accounts),
     )
-    account_list = "".join(f"<li><code>{a.uid}</code></li>" for a in session.accounts)
+    from html import escape
+    account_list = "".join(f"<li><code>{escape(a.uid)}</code></li>" for a in session.accounts)
     html = f"""
     <html><body>
     <h2>✅ Connected!</h2>
-    <p>Session ID: <code>{session.session_id}</code></p>
+    <p>Session ID: <code>{escape(session.session_id)}</code></p>
     <p>Accounts:</p><ul>{account_list}</ul>
     <p><a href="/accounts">View accounts JSON</a></p>
     </body></html>
     """
     html_response = HTMLResponse(content=html)
     html_response.set_cookie(
-        key="session_id", value=session.session_id, httponly=True, samesite="lax"
+        key="session_id", value=session.session_id, httponly=True, samesite="lax", secure=True
     )
     return html_response

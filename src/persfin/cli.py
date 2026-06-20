@@ -331,7 +331,7 @@ def _save_session_cache(sessions: dict[str, BankSession]) -> None:
     """
     cache_file = _CACHE_FILE
     _CACHE_DIR.mkdir(parents=True, exist_ok=True)
-    data = {k: json.loads(v.model_dump_json()) for k, v in sessions.items()}
+    data = {k: v.model_dump(mode="json") for k, v in sessions.items()}
     cache_file.write_text(
         json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8"
     )
