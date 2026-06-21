@@ -22,12 +22,13 @@ import sys
 import threading
 import time
 import webbrowser
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import NamedTuple
 
 import httpx
 import polars as pl
+import typer
 import uvicorn
 
 from persfin.core.session_store import get_store
@@ -91,7 +92,7 @@ def _prompt_bank_multi_selection(
     ``maximum_consent_validity`` is in seconds, or ``None`` if the ASPSP
     does not advertise a limit.
     """
-    print(f"\nFetching available banks for country '{country}'…")
+    print(f"\nFetching available banks for country '{country}'...")
     response = get_aspsps(country=country)
     banks = response.aspsps
 
@@ -130,7 +131,7 @@ def _prompt_bank_multi_selection(
                             maximum_consent_validity=bank.maximum_consent_validity,
                         )
                     )
-            print("\n→ Selected bank(s):")
+            print("\n-> Selected bank(s):")
             for b in selected:
                 print(f"    - {b.aspsp_name} ({b.aspsp_country})")
             return selected
@@ -197,9 +198,25 @@ def _invalidate_session(session_id: str) -> None:
         print(f"   (Could not remove invalid session from cache: {exc})")
 
 
+def _validate_from_date(value: str | None) -> date | None:
+    """Validate that the input is a valid YYYY-MM-DD date and is today or earlier."""
+    if value is None:
+        return None
+
+    try:
+        parsed_date = datetime.strptime(value, "%Y-%m-%d").date()
+    except ValueError as e:
+        raise typer.BadParameter("Invalid date format. Must be YYYY-MM-DD.") from e
+
+    if parsed_date > date.today():
+        raise typer.BadParameter("Date must be today or earlier.")
+
+    return parsed_date
+
+
 def _export_transactions_to_csv(
     sessions: list[SessionResponse],
-    days: int = 90,
+    from_date: date | None = None,
     output_dir: Path | None = None,
 ) -> None:
     """Fetch transactions for every account, print a preview, and write one CSV per account.
@@ -222,7 +239,10 @@ def _export_transactions_to_csv(
     else:
         output_dir.mkdir(parents=True, exist_ok=True)
 
-    date_from = (datetime.now(UTC) - timedelta(days=days)).date().isoformat()
+    if from_date is None:
+        date_from = (datetime.now(UTC) - timedelta(days=90)).date().isoformat()
+    else:
+        date_from = from_date.isoformat()
 
     for session in sessions:
         print(f"\n{'=' * 60}")
@@ -302,14 +322,14 @@ def _export_transactions_to_csv(
                         f"  {(row['remittance_information'] or '')[:50]}"
                     )
                 if len(rows) > 20:
-                    print(f"   … and {len(rows) - 20} more (all written to CSV).")
+                    print(f"   ... and {len(rows) - 20} more (all written to CSV).")
             else:
                 print("   (no transactions found in this period)")
 
             # Write CSV
             if not rows:
                 print(
-                    f"  (No transactions fetched for {account.display_name} — skipping CSV)"
+                    f"  (No transactions fetched for {account.display_name} - skipping CSV)"
                 )
                 continue
 
@@ -319,7 +339,7 @@ def _export_transactions_to_csv(
             safe_name = account.display_name.replace("/", "_").replace("\\", "_")
             csv_path = output_dir / f"{safe_name}.csv"
             df.write_csv(csv_path)
-            print(f"   → Wrote {len(rows)} row(s) to {csv_path}")
+            print(f"   -> Wrote {len(rows)} row(s) to {csv_path}")
 
     print(f"\n{'=' * 60}\n")
 
@@ -360,14 +380,26 @@ def _save_session_cache(sessions: dict[str, BankSession]) -> None:
     if sys.platform != "win32":
         _CACHE_DIR.chmod(0o700)  # rwx------  (owner only)
         cache_file.chmod(0o600)  # rw-------  (owner only)
-    print(f"Session cache updated → {cache_file}")
+    print(f"Session cache updated -> {cache_file}")
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────
 
 
-def main() -> None:
+cli_app = typer.Typer(add_completion=False)
+
+
+@cli_app.command()
+def run_cli(
+    from_date: str = typer.Option(
+        None,
+        "--from-date",
+        "-fd",
+        help="Only retrieve transactions from this date (YYYY-MM-DD) and later. Must be in the past or today.",
+    ),
+) -> None:
     """Run the CLI."""
+    parsed_date = _validate_from_date(from_date)
     store = get_store()
 
     # 1. Load all cached bank sessions (both valid and expired)
@@ -413,13 +445,13 @@ def main() -> None:
                 maximum_consent_validity=bank.maximum_consent_validity,
             )
 
-            print(f"\nOpening browser for {bank.aspsp_name}…")
+            print(f"\nOpening browser for {bank.aspsp_name}...")
             print(f"  URL: {auth_result.url}")
             if bank.aspsp_name == "Mock ASPSP":
                 print(
                     "  (Mock ASPSP: make sure you are signed in at enablebanking.com)"
                 )
-            print("  Waiting up to 10 minutes for you to complete the login…")
+            print("  Waiting up to 10 minutes for you to complete the login...")
             webbrowser.open(auth_result.url)
 
             new_session_id = _wait_for_new_session(known_ids, timeout=600)
@@ -442,7 +474,12 @@ def main() -> None:
         _save_session_cache(all_cached)
 
     # 5. Fetch, display, and export transactions
-    _export_transactions_to_csv(store.all(), output_dir=_DATA_DIR)
+    _export_transactions_to_csv(store.all(), from_date=parsed_date, output_dir=_DATA_DIR)
+
+
+def main() -> None:
+    """Entrypoint wrapper for console scripts."""
+    cli_app()
 
 
 if __name__ == "__main__":
