@@ -26,6 +26,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import NamedTuple
 
+import httpx
 import polars as pl
 import uvicorn
 
@@ -182,6 +183,20 @@ def _wait_for_new_session(known_ids: set[str], timeout: int = 600) -> str:
     raise SystemExit("Timed out waiting for bank callback. Please try again.")
 
 
+def _invalidate_session(session_id: str) -> None:
+    """Remove a session from the cache file if it becomes invalid (e.g. 401 Unauthorized)."""
+    try:
+        cache = _load_session_cache()
+        keys_to_remove = [k for k, v in cache.items() if v.session_id == session_id]
+        if keys_to_remove:
+            for k in keys_to_remove:
+                del cache[k]
+            _save_session_cache(cache)
+            print(f"   -> Automatically removed invalid session {session_id} from cache.")
+    except Exception as exc:
+        print(f"   (Could not remove invalid session from cache: {exc})")
+
+
 def _export_transactions_to_csv(
     sessions: list[SessionResponse],
     days: int = 90,
@@ -199,7 +214,7 @@ def _export_transactions_to_csv(
     can trigger a 429 when the same endpoint is called twice in quick succession.
     """
     if not sessions:
-        print("No session available — cannot export transactions.")
+        print("No session available - cannot export transactions.")
         return
 
     if output_dir is None:
@@ -228,7 +243,11 @@ def _export_transactions_to_csv(
                         f"   {label:<30} {b.balance_amount.amount} {b.balance_amount.currency}"
                     )
             except Exception as exc:
-                print(f"   (Could not fetch balances: {exc})")
+                if isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code == 401:
+                    print(f"   (Could not fetch balances: {exc} - session has expired/been revoked on the server)")
+                    _invalidate_session(session.session_id)
+                else:
+                    print(f"   (Could not fetch balances: {exc})")
 
             # Fetch all transactions (single call, paged)
             rows: list[dict] = []
@@ -244,6 +263,9 @@ def _export_transactions_to_csv(
                     )
                 except Exception as exc:
                     fetch_error = str(exc)
+                    if isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code == 401:
+                        fetch_error += " - session has expired/been revoked on the server"
+                        _invalidate_session(session.session_id)
                     break
 
                 rows.extend(
