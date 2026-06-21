@@ -193,7 +193,9 @@ def _invalidate_session(session_id: str) -> None:
             for k in keys_to_remove:
                 del cache[k]
             _save_session_cache(cache)
-            print(f"   -> Automatically removed invalid session {session_id} from cache.")
+            print(
+                f"   -> Automatically removed invalid session {session_id} from cache."
+            )
     except Exception as exc:
         print(f"   (Could not remove invalid session from cache: {exc})")
 
@@ -263,8 +265,13 @@ def _export_transactions_to_csv(
                         f"   {label:<30} {b.balance_amount.amount} {b.balance_amount.currency}"
                     )
             except Exception as exc:
-                if isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code == 401:
-                    print(f"   (Could not fetch balances: {exc} - session has expired/been revoked on the server)")
+                if (
+                    isinstance(exc, httpx.HTTPStatusError)
+                    and exc.response.status_code == 401
+                ):
+                    print(
+                        f"   (Could not fetch balances: {exc} - session has expired/been revoked on the server)"
+                    )
                     _invalidate_session(session.session_id)
                 else:
                     print(f"   (Could not fetch balances: {exc})")
@@ -283,8 +290,13 @@ def _export_transactions_to_csv(
                     )
                 except Exception as exc:
                     fetch_error = str(exc)
-                    if isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code == 401:
-                        fetch_error += " - session has expired/been revoked on the server"
+                    if (
+                        isinstance(exc, httpx.HTTPStatusError)
+                        and exc.response.status_code == 401
+                    ):
+                        fetch_error += (
+                            " - session has expired/been revoked on the server"
+                        )
                         _invalidate_session(session.session_id)
                     break
 
@@ -334,7 +346,20 @@ def _export_transactions_to_csv(
                 continue
 
             df = pl.DataFrame(rows, infer_schema_length=len(rows))
-            df = df.filter(pl.col("status") != "PDNG")
+
+            amount = pl.col("amount").cast(pl.Decimal(scale=2), strict=True)
+
+            df = (
+                 df.filter(pl.col("status") != "PDNG")
+                 .with_columns(
+                    pl.when(pl.col("credit_debit_indicator") == "CRDT")
+                    .then(amount)
+                    .when(pl.col("credit_debit_indicator") == "DBIT")
+                    .then(-amount)
+                    .otherwise(None)
+                    .alias("amount")
+                )
+            )
 
             safe_name = account.display_name.replace("/", "_").replace("\\", "_")
             csv_path = output_dir / f"{safe_name}.csv"
@@ -424,8 +449,7 @@ def run_cli(
         for bs in expired.values():
             print(f"  - {bs.aspsp_name} ({bs.aspsp_country})")
         banks_to_auth = [
-            BankToAuth(bs.aspsp_name, bs.aspsp_country, None)
-            for bs in expired.values()
+            BankToAuth(bs.aspsp_name, bs.aspsp_country, None) for bs in expired.values()
         ]
     else:
         # All sessions are valid — nothing to do
@@ -474,7 +498,9 @@ def run_cli(
         _save_session_cache(all_cached)
 
     # 5. Fetch, display, and export transactions
-    _export_transactions_to_csv(store.all(), from_date=parsed_date, output_dir=_DATA_DIR)
+    _export_transactions_to_csv(
+        store.all(), from_date=parsed_date, output_dir=_DATA_DIR
+    )
 
 
 def main() -> None:
