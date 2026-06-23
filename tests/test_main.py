@@ -15,9 +15,8 @@ import re
 from datetime import UTC, datetime, timedelta
 
 import httpx
-import pytest
-from pytest_mock import MockerFixture
 from fastapi.testclient import TestClient
+from pytest_mock import MockerFixture
 
 from persfin.core.session_store import SessionStore
 from persfin.schemas.schemas import (

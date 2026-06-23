@@ -5,15 +5,20 @@ interactive terminal are tested here.  Functions that orchestrate threads and
 user input (_start_server_thread, _wait_for_new_session, main, …) are
 integration concerns and are not covered at unit-test level.
 """
-
 import json
 import sys
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
 import pytest
+import typer
 
-from persfin.cli import _cache_key, _load_session_cache, _save_session_cache
+from persfin.cli import (
+    _cache_key,
+    _load_session_cache,
+    _save_session_cache,
+    _validate_from_date,
+)
 from persfin.schemas.schemas import AccountRef, BankSession
 
 # ── Fixtures ──────────────────────────────────────────────────────────────────
@@ -220,3 +225,34 @@ class TestSaveSessionCache:
 
         dir_mode = stat.S_IMODE(tmp_path.stat().st_mode)
         assert dir_mode == 0o700, f"Expected 0o700, got {oct(dir_mode)}"
+
+
+# ── _validate_from_date ────────────────────────────────────────────────────────
+
+
+class TestValidateFromDate:
+    def test_valid_past_date_succeeds(self) -> None:
+        assert _validate_from_date("2023-12-31") == date(2023, 12, 31)
+
+    def test_today_date_succeeds(self) -> None:
+        today_date = date.today()
+        today_str = today_date.isoformat()
+        assert _validate_from_date(today_str) == today_date
+
+    def test_none_succeeds(self) -> None:
+        assert _validate_from_date(None) is None
+
+    def test_future_date_fails(self) -> None:
+        tomorrow = (date.today() + timedelta(days=1)).isoformat()
+        with pytest.raises(typer.BadParameter, match="Date must be today or earlier"):
+            _validate_from_date(tomorrow)
+
+    def test_invalid_format_fails(self) -> None:
+        with pytest.raises(typer.BadParameter, match="Must be YYYY-MM-DD"):
+            _validate_from_date("2023/12/31")
+        with pytest.raises(typer.BadParameter, match="Must be YYYY-MM-DD"):
+            _validate_from_date("31-12-2023")
+
+    def test_invalid_calendar_date_fails(self) -> None:
+        with pytest.raises(typer.BadParameter, match="Must be YYYY-MM-DD"):
+            _validate_from_date("2023-02-30")
