@@ -235,7 +235,7 @@ class TestValidateFromDate:
         assert _validate_from_date("2023-12-31") == date(2023, 12, 31)
 
     def test_today_date_succeeds(self) -> None:
-        today_date = datetime.now(UTC).date()
+        today_date = date.today()
         today_str = today_date.isoformat()
         assert _validate_from_date(today_str) == today_date
 
@@ -243,7 +243,7 @@ class TestValidateFromDate:
         assert _validate_from_date(None) is None
 
     def test_future_date_fails(self) -> None:
-        tomorrow = (datetime.now(UTC) + timedelta(days=1)).date().isoformat()
+        tomorrow = (date.today() + timedelta(days=1)).isoformat()
         with pytest.raises(typer.BadParameter, match="Date must be today or earlier"):
             _validate_from_date(tomorrow)
 
