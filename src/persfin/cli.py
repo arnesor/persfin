@@ -252,6 +252,7 @@ def _export_transactions_to_csv(
         print(f"  Accounts   : {len(session.accounts)}")
         print(f"{'=' * 60}")
 
+        session_expired = False
         for account in session.accounts:
             uid = account.uid
             print(f"\n-- Account: {account.display_name} (uid: {uid}) --")
@@ -273,6 +274,8 @@ def _export_transactions_to_csv(
                         f"   (Could not fetch balances: {exc} - session has expired/been revoked on the server)"
                     )
                     _invalidate_session(session.session_id)
+                    session_expired = True
+                    break
                 else:
                     print(f"   (Could not fetch balances: {exc})")
 
@@ -298,6 +301,7 @@ def _export_transactions_to_csv(
                             " - session has expired/been revoked on the server"
                         )
                         _invalidate_session(session.session_id)
+                        session_expired = True
                     break
 
                 rows.extend(
@@ -337,6 +341,9 @@ def _export_transactions_to_csv(
                     print(f"   ... and {len(rows) - 20} more (all written to CSV).")
             else:
                 print("   (no transactions found in this period)")
+
+            if session_expired:
+                break
 
             # Write CSV
             if not rows:
