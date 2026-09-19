@@ -5,6 +5,7 @@ interactive terminal are tested here.  Functions that orchestrate threads and
 user input (_start_server_thread, _wait_for_new_session, main, …) are
 integration concerns and are not covered at unit-test level.
 """
+
 import json
 import sys
 from datetime import UTC, date, datetime, timedelta
@@ -15,11 +16,20 @@ import typer
 
 from persfin.cli import (
     _cache_key,
+    _find_source_account,
     _load_session_cache,
+    _pocketsmith_start_date,
     _save_session_cache,
+    _select_pocketsmith_account,
     _validate_from_date,
 )
-from persfin.schemas.schemas import AccountRef, BankSession
+from persfin.schemas.schemas import (
+    AccountIdentification,
+    AccountRef,
+    BankSession,
+    SessionResponse,
+)
+from persfin.services.pocketsmith import PocketSmithTransactionAccount
 
 # ── Fixtures ──────────────────────────────────────────────────────────────────
 
@@ -256,3 +266,108 @@ class TestValidateFromDate:
     def test_invalid_calendar_date_fails(self) -> None:
         with pytest.raises(typer.BadParameter, match="Must be YYYY-MM-DD"):
             _validate_from_date("2023-02-30")
+
+
+class TestPocketSmithAccountSelection:
+    def test_finds_account_by_primary_iban(self) -> None:
+        account = AccountRef(
+            uid="source-uid",
+            account_id=AccountIdentification(iban="NO11111111111"),
+        )
+        sessions = [SessionResponse(session_id="session", accounts=[account])]
+
+        assert _find_source_account(sessions, "NO11111111111") is account
+
+    def test_does_not_match_uid_or_missing_iban(self) -> None:
+        account = AccountRef(uid="NO11111111111")
+        sessions = [SessionResponse(session_id="session", accounts=[account])]
+
+        with pytest.raises(ValueError, match="was not found"):
+            _find_source_account(sessions, "NO11111111111")
+
+    def test_rejects_duplicate_matches(self) -> None:
+        accounts = [
+            AccountRef(
+                uid=f"uid-{index}",
+                account_id=AccountIdentification(iban="NO11111111111"),
+            )
+            for index in range(2)
+        ]
+        sessions = [SessionResponse(session_id="session", accounts=accounts)]
+
+        with pytest.raises(ValueError, match="multiple sessions"):
+            _find_source_account(sessions, "NO11111111111")
+
+    def test_uses_cutover_without_cli_date(self) -> None:
+        cutover = date(2026, 9, 1)
+
+        assert _pocketsmith_start_date(None, cutover, date(2026, 6, 1)) == cutover
+
+    def test_uses_later_of_cli_and_cutover_dates(self) -> None:
+        cutover = date(2026, 9, 1)
+
+        default = date(2026, 6, 1)
+
+        assert _pocketsmith_start_date(date(2026, 9, 10), cutover, default) == date(
+            2026, 9, 10
+        )
+        assert _pocketsmith_start_date(date(2026, 8, 1), cutover, default) == cutover
+
+    def test_uses_cli_date_when_cutover_is_not_configured(self) -> None:
+        requested = date(2026, 9, 10)
+
+        assert _pocketsmith_start_date(requested, None, date(2026, 6, 1)) == requested
+
+    def test_uses_default_when_no_dates_are_configured(self) -> None:
+        default = date(2026, 6, 1)
+
+        assert _pocketsmith_start_date(None, None, default) == default
+
+
+class TestPocketSmithDestinationSelection:
+    @staticmethod
+    def _account(
+        account_id: int, name: str, number: str | None
+    ) -> PocketSmithTransactionAccount:
+        return PocketSmithTransactionAccount(
+            id=account_id,
+            name=name,
+            number=number,
+            currency_code="NOK",
+        )
+
+    def test_automatically_matches_iban(self) -> None:
+        accounts = [
+            self._account(1, "Savings", "NO22222222222"),
+            self._account(2, "Daily", "NO11111111111"),
+        ]
+
+        assert _select_pocketsmith_account(accounts, "NO11111111111") == 2
+
+    def test_normalizes_spaces_and_case_when_matching(self) -> None:
+        accounts = [self._account(42, "Daily", "no11 1111 11111")]
+
+        assert _select_pocketsmith_account(accounts, "NO11111111111") == 42
+
+    def test_prompts_when_no_account_matches(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        accounts = [
+            self._account(10, "Savings", "NO22222222222"),
+            self._account(20, "Daily", None),
+        ]
+        answers = iter(["invalid", "3", "2"])
+        monkeypatch.setattr("builtins.input", lambda _: next(answers))
+
+        selected = _select_pocketsmith_account(accounts, "NO11111111111")
+
+        assert selected == 20
+        output = capsys.readouterr().out
+        assert "Savings" in output
+        assert "NO22222222222" in output
+        assert "Daily" in output
+        assert "id: 20" in output
+
+    def test_rejects_empty_account_list(self) -> None:
+        with pytest.raises(ValueError, match="No PocketSmith transaction accounts"):
+            _select_pocketsmith_account([], "NO11111111111")

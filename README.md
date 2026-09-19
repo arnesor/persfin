@@ -93,6 +93,34 @@ browser, and then prints your balances and recent transactions and stores to csv
 uv run persfin-cli
 ```
 
+### PocketSmith synchronization
+
+The CLI can optionally send booked transactions for bank account
+`NO11111111111` directly to a PocketSmith transaction account. Pending
+transactions are not uploaded, and ordinary CLI runs remain CSV-only.
+
+1. Create a developer key in PocketSmith under **Settings > Security**.
+2. Set the developer key and source IBAN shown in `.env.example`.
+   The CLI automatically selects a PocketSmith transaction account whose
+   account number matches the source IBAN. If there is no unique match, it lists
+   the available account names, numbers, and IDs and asks you to select one.
+3. Optionally choose a permanent cutover date after transactions previously
+   imported from CSV; older transactions will never be uploaded by this
+   integration. Without one, sync uses `--from-date` or the last 90 days.
+4. Run:
+
+```bash
+uv run persfin-cli --pocketsmith
+```
+
+You can restrict a run further with `--from-date YYYY-MM-DD`. When a cutover is
+configured, the later of that date and `POCKETSMITH_CUTOVER_DATE` is used.
+Uploaded transactions retain a
+stable Enable Banking identity in PocketSmith's cheque-number field, so retries
+skip transactions already created, including after a partially failed run.
+`POCKETSMITH_TRANSACTION_ACCOUNT_ID` remains available as an optional override
+when automatic matching should not be used.
+
 Sample session:
 
 ```
@@ -197,7 +225,8 @@ src/persfin/
 │   ├── config.py            # pydantic-settings (was persfin/config.py)
 │   └── session_store.py     # SessionStore + get_store + StoreDep (was in main.py)
 ├── services/
-│   └── enablebanking.py     # HTTP client (was persfin/enablebanking.py)
+│   ├── enablebanking.py     # Enable Banking HTTP client
+│   └── pocketsmith.py       # PocketSmith HTTP client and synchronization
 └── api/
     ├── banks.py             # GET /banks
     ├── auth.py              # POST /connect, GET /callback

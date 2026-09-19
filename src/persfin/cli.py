@@ -22,6 +22,7 @@ import sys
 import threading
 import time
 import webbrowser
+from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import NamedTuple
@@ -33,12 +34,23 @@ import uvicorn
 
 from persfin.core.session_store import get_store
 from persfin.main import app
-from persfin.schemas.schemas import BankSession, SessionResponse
+from persfin.schemas.schemas import (
+    AccountRef,
+    BankSession,
+    SessionResponse,
+    Transaction,
+)
 from persfin.services.enablebanking import (
     get_aspsps,
     get_balances,
     get_transactions,
     start_auth,
+)
+from persfin.services.pocketsmith import (
+    PocketSmithClient,
+    PocketSmithSyncResult,
+    PocketSmithTransactionAccount,
+    sync_transactions,
 )
 
 # ── Constants ─────────────────────────────────────────────────────────────────
@@ -78,6 +90,16 @@ class BankToAuth(NamedTuple):
     aspsp_name: str
     aspsp_country: str
     maximum_consent_validity: int | None  # seconds, or None to use the default
+
+
+@dataclass(frozen=True)
+class PocketSmithSyncConfig:
+    """PocketSmith dependencies and account mapping for one CLI run."""
+
+    client: PocketSmithClient
+    transaction_account_id: int
+    source_iban: str
+    cutover_date: date | None = None
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -216,10 +238,101 @@ def _validate_from_date(value: str | None) -> date | None:
     return parsed_date
 
 
+def _find_source_account(
+    sessions: list[SessionResponse], source_iban: str
+) -> AccountRef:
+    """Find exactly one account whose primary IBAN matches the source IBAN."""
+    matches = [
+        account
+        for session in sessions
+        for account in session.accounts
+        if account.account_id is not None and account.account_id.iban == source_iban
+    ]
+    if not matches:
+        raise ValueError(
+            f"Bank account {source_iban} was not found in active sessions."
+        )
+    if len(matches) > 1:
+        raise ValueError(f"Bank account {source_iban} appears in multiple sessions.")
+    return matches[0]
+
+
+def _pocketsmith_start_date(
+    from_date: date | None, cutover_date: date | None, default_start_date: date
+) -> date:
+    """Return the latest configured start date, falling back to the CLI default."""
+    candidates = [
+        candidate for candidate in (from_date, cutover_date) if candidate is not None
+    ]
+    return max(candidates) if candidates else default_start_date
+
+
+def _select_pocketsmith_account(
+    accounts: list[PocketSmithTransactionAccount], source_iban: str
+) -> int:
+    """Automatically match an IBAN or prompt for a PocketSmith account."""
+    normalized_iban = "".join(source_iban.split()).upper()
+    matches = [
+        account
+        for account in accounts
+        if account.number is not None
+        and "".join(account.number.split()).upper() == normalized_iban
+    ]
+    if len(matches) == 1:
+        account = matches[0]
+        print(
+            f"Matched PocketSmith account: {account.name or 'Unnamed account'} "
+            f"({account.number}, id: {account.id})"
+        )
+        return account.id
+
+    if not accounts:
+        raise ValueError("No PocketSmith transaction accounts were found.")
+
+    if len(matches) > 1:
+        print(f"Multiple PocketSmith accounts match {source_iban}.")
+    else:
+        print(f"No PocketSmith account number matches {source_iban}.")
+    print("Select the PocketSmith destination account:\n")
+    for index, account in enumerate(accounts, start=1):
+        print(
+            f"  {index:>3}. {account.name or 'Unnamed account'} "
+            f"(number: {account.number or 'not set'}, id: {account.id})"
+        )
+
+    while True:
+        raw = input("\nPocketSmith account number: ").strip()
+        try:
+            selected = int(raw)
+        except ValueError:
+            print("  Please enter a number from the list.")
+            continue
+        if 1 <= selected <= len(accounts):
+            return accounts[selected - 1].id
+        print(f"  Please enter a number between 1 and {len(accounts)}.")
+
+
+def _fetch_all_transactions(account_uid: str, date_from: str) -> list[Transaction]:
+    """Fetch every Enable Banking transaction page for an account."""
+    transactions: list[Transaction] = []
+    continuation_key: str | None = None
+    while True:
+        response = get_transactions(
+            account_uid=account_uid,
+            date_from=date_from,
+            continuation_key=continuation_key,
+        )
+        transactions.extend(response.transactions)
+        continuation_key = response.continuation_key
+        if not continuation_key:
+            return transactions
+
+
 def _export_transactions_to_csv(
     sessions: list[SessionResponse],
     from_date: date | None = None,
     output_dir: Path | None = None,
+    pocketsmith: PocketSmithSyncConfig | None = None,
 ) -> None:
     """Fetch transactions for every account, print a preview, and write one CSV per account.
 
@@ -241,10 +354,17 @@ def _export_transactions_to_csv(
     else:
         output_dir.mkdir(parents=True, exist_ok=True)
 
-    if from_date is None:
-        date_from = (datetime.now(UTC) - timedelta(days=90)).date().isoformat()
-    else:
-        date_from = from_date.isoformat()
+    default_start_date = from_date or (datetime.now(UTC) - timedelta(days=90)).date()
+    source_account = (
+        _find_source_account(sessions, pocketsmith.source_iban)
+        if pocketsmith is not None
+        else None
+    )
+    sync_start_date = (
+        _pocketsmith_start_date(from_date, pocketsmith.cutover_date, default_start_date)
+        if pocketsmith is not None
+        else None
+    )
 
     for session in sessions:
         print(f"\n{'=' * 60}")
@@ -255,6 +375,13 @@ def _export_transactions_to_csv(
         session_expired = False
         for account in session.accounts:
             uid = account.uid
+            account_start_date = (
+                sync_start_date
+                if source_account is not None and account is source_account
+                else default_start_date
+            )
+            assert account_start_date is not None
+            date_from = account_start_date.isoformat()
             print(f"\n-- Account: {account.display_name} (uid: {uid}) --")
 
             # Balances
@@ -280,48 +407,36 @@ def _export_transactions_to_csv(
                     print(f"   (Could not fetch balances: {exc})")
 
             # Fetch all transactions (single call, paged)
-            rows: list[dict] = []
-            continuation_key: str | None = None
+            transactions: list[Transaction] = []
             fetch_error: str | None = None
 
-            while True:
-                try:
-                    resp = get_transactions(
-                        account_uid=uid,
-                        date_from=date_from,
-                        continuation_key=continuation_key,
-                    )
-                except Exception as exc:
-                    fetch_error = str(exc)
-                    if (
-                        isinstance(exc, httpx.HTTPStatusError)
-                        and exc.response.status_code == 401
-                    ):
-                        fetch_error += (
-                            " - session has expired/been revoked on the server"
-                        )
-                        _invalidate_session(session.session_id)
-                        session_expired = True
-                    break
+            try:
+                transactions = _fetch_all_transactions(uid, date_from)
+            except Exception as exc:
+                fetch_error = str(exc)
+                if (
+                    isinstance(exc, httpx.HTTPStatusError)
+                    and exc.response.status_code == 401
+                ):
+                    fetch_error += " - session has expired/been revoked on the server"
+                    _invalidate_session(session.session_id)
+                    session_expired = True
 
-                rows.extend(
-                    {
-                        "booking_date": t.booking_date,
-                        "amount": t.transaction_amount.amount,
-                        "currency": t.transaction_amount.currency,
-                        "credit_debit_indicator": t.credit_debit_indicator,
-                        "status": t.status,
-                        "remittance_information": (
-                            "|".join(t.remittance_information)
-                            if t.remittance_information
-                            else None
-                        ),
-                    }
-                    for t in resp.transactions
-                )
-                continuation_key = resp.continuation_key
-                if not continuation_key:
-                    break
+            rows = [
+                {
+                    "booking_date": transaction.booking_date,
+                    "amount": transaction.transaction_amount.amount,
+                    "currency": transaction.transaction_amount.currency,
+                    "credit_debit_indicator": transaction.credit_debit_indicator,
+                    "status": transaction.status,
+                    "remittance_information": (
+                        "|".join(transaction.remittance_information)
+                        if transaction.remittance_information
+                        else None
+                    ),
+                }
+                for transaction in transactions
+            ]
 
             # Print transaction preview (up to 20 rows)
             print(f"\n   Transactions since {date_from} ({len(rows)} total):")
@@ -356,24 +471,46 @@ def _export_transactions_to_csv(
 
             amount = pl.col("amount").cast(pl.Decimal(scale=2), strict=True)
 
-            df = (
-                 df.filter(pl.col("status") != "PDNG")
-                 .with_columns(
-                    pl.when(pl.col("credit_debit_indicator") == "CRDT")
-                    .then(amount)
-                    .when(pl.col("credit_debit_indicator") == "DBIT")
-                    .then(-amount)
-                    .otherwise(None)
-                    .alias("amount")
-                )
+            df = df.filter(pl.col("status") != "PDNG").with_columns(
+                pl.when(pl.col("credit_debit_indicator") == "CRDT")
+                .then(amount)
+                .when(pl.col("credit_debit_indicator") == "DBIT")
+                .then(-amount)
+                .otherwise(None)
+                .alias("amount")
             )
 
             safe_name = account.display_name.replace("/", "_").replace("\\", "_")
             csv_path = output_dir / f"{safe_name}.csv"
             df.write_csv(csv_path)
-            print(f"   -> Wrote {len(rows)} row(s) to {csv_path}")
+            print(f"   -> Wrote {df.height} row(s) to {csv_path}")
+
+            if (
+                pocketsmith is not None
+                and source_account is not None
+                and account is source_account
+            ):
+                assert sync_start_date is not None
+                result = sync_transactions(
+                    client=pocketsmith.client,
+                    account_id=pocketsmith.transaction_account_id,
+                    account_uid=account.uid,
+                    transactions=transactions,
+                    start_date=sync_start_date,
+                )
+                _print_pocketsmith_result(result)
 
     print(f"\n{'=' * 60}\n")
+
+
+def _print_pocketsmith_result(result: PocketSmithSyncResult) -> None:
+    print(
+        "   -> PocketSmith: "
+        f"{result.created} created, "
+        f"{result.duplicates} duplicate(s), "
+        f"{result.pending} pending, "
+        f"{result.invalid} invalid"
+    )
 
 
 # ── Session cache ─────────────────────────────────────────────────────────────
@@ -428,6 +565,11 @@ def run_cli(
         "--from-date",
         "-fd",
         help="Only retrieve transactions from this date (YYYY-MM-DD) and later. Must be in the past or today.",
+    ),
+    pocketsmith: bool = typer.Option(
+        False,
+        "--pocketsmith",
+        help="Upload booked transactions from the configured bank account to PocketSmith.",
     ),
 ) -> None:
     """Run the CLI."""
@@ -504,10 +646,58 @@ def run_cli(
 
         _save_session_cache(all_cached)
 
-    # 5. Fetch, display, and export transactions
-    _export_transactions_to_csv(
-        store.all(), from_date=parsed_date, output_dir=_DATA_DIR
-    )
+    # 5. Fetch, display, export, and optionally synchronize transactions
+    sessions = store.all()
+    if not pocketsmith:
+        _export_transactions_to_csv(
+            sessions, from_date=parsed_date, output_dir=_DATA_DIR
+        )
+        return
+
+    from persfin.core.config import get_settings
+
+    settings = get_settings()
+    developer_key = settings.pocketsmith_developer_key
+    transaction_account_id = settings.pocketsmith_transaction_account_id
+    cutover_date = settings.pocketsmith_cutover_date
+    missing: list[str] = []
+    if developer_key is None:
+        missing.append("POCKETSMITH_DEVELOPER_KEY")
+    if missing:
+        raise typer.BadParameter(
+            f"Missing PocketSmith configuration: {', '.join(missing)}",
+            param_hint="--pocketsmith",
+        )
+    assert developer_key is not None
+    if cutover_date is not None and cutover_date > date.today():
+        raise typer.BadParameter(
+            "POCKETSMITH_CUTOVER_DATE must be today or earlier.",
+            param_hint="--pocketsmith",
+        )
+
+    with httpx.Client(
+        base_url=settings.pocketsmith_api_origin,
+        headers={"X-Developer-Key": developer_key.get_secret_value()},
+        timeout=30,
+    ) as http_client:
+        pocketsmith_client = PocketSmithClient(http_client)
+        if transaction_account_id is None:
+            transaction_account_id = _select_pocketsmith_account(
+                pocketsmith_client.list_transaction_accounts(),
+                settings.pocketsmith_source_iban,
+            )
+        sync_config = PocketSmithSyncConfig(
+            client=pocketsmith_client,
+            transaction_account_id=transaction_account_id,
+            source_iban=settings.pocketsmith_source_iban,
+            cutover_date=cutover_date,
+        )
+        _export_transactions_to_csv(
+            sessions,
+            from_date=parsed_date,
+            output_dir=_DATA_DIR,
+            pocketsmith=sync_config,
+        )
 
 
 def main() -> None:
