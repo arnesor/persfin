@@ -6,6 +6,7 @@ user input (_start_server_thread, _wait_for_new_session, main, …) are
 integration concerns and are not covered at unit-test level.
 """
 
+import csv
 import json
 import sys
 from datetime import UTC, date, datetime, timedelta
@@ -15,21 +16,32 @@ import pytest
 import typer
 
 from persfin.cli import (
+    PocketSmithSyncConfig,
     _cache_key,
+    _export_transactions_to_csv,
     _find_source_account,
     _load_session_cache,
     _pocketsmith_start_date,
     _save_session_cache,
     _select_pocketsmith_account,
     _validate_from_date,
+    _write_debug_csv,
 )
 from persfin.schemas.schemas import (
     AccountIdentification,
     AccountRef,
+    BalancesResponse,
     BankSession,
     SessionResponse,
+    Transaction,
+    TransactionsResponse,
 )
-from persfin.services.pocketsmith import PocketSmithTransactionAccount
+from persfin.services.pocketsmith import (
+    PocketSmithClient,
+    PocketSmithSyncResult,
+    PocketSmithTransaction,
+    PocketSmithTransactionAccount,
+)
 
 # ── Fixtures ──────────────────────────────────────────────────────────────────
 
@@ -380,3 +392,244 @@ class TestPocketSmithDestinationSelection:
     def test_rejects_empty_account_list(self) -> None:
         with pytest.raises(ValueError, match="No PocketSmith transaction accounts"):
             _select_pocketsmith_account([], "NO11111111111")
+
+
+class TestDebugCsv:
+    def test_writes_all_fields_and_json_encodes_nested_values(
+        self, tmp_path: Path
+    ) -> None:
+        path = tmp_path / "account_debug.csv"
+        records = [
+            {
+                "transaction_id": "bank-1",
+                "remittance_information": ["Invoice", "123"],
+                "transaction_amount": {
+                    "amount": "10.00",
+                    "currency": "NOK",
+                    "bank_extension": "retained",
+                },
+                "unknown_bank_field": {"nested": True},
+                "nullable_field": None,
+                "marker_string": "<field not returned>",
+            },
+            {"transaction_id": ""},
+        ]
+
+        _write_debug_csv(records, path)
+
+        with path.open(encoding="utf-8", newline="") as csv_file:
+            rows = list(csv.DictReader(csv_file))
+        assert json.loads(rows[0]["transaction_id"]) == "bank-1"
+        assert json.loads(rows[0]["remittance_information"]) == ["Invoice", "123"]
+        assert json.loads(rows[0]["transaction_amount"])["bank_extension"] == (
+            "retained"
+        )
+        assert json.loads(rows[0]["unknown_bank_field"]) == {"nested": True}
+        assert json.loads(rows[0]["nullable_field"]) is None
+        assert json.loads(rows[0]["marker_string"]) == "<field not returned>"
+        assert rows[1]["nullable_field"] == ""
+        assert json.loads(rows[1]["transaction_id"]) == ""
+
+    def test_creates_empty_file_when_api_returns_no_records(
+        self, tmp_path: Path
+    ) -> None:
+        path = tmp_path / "pocketsmith_42_debug.csv"
+
+        _write_debug_csv([], path)
+
+        assert path.read_text(encoding="utf-8") == ""
+
+    @pytest.mark.skipif(
+        sys.platform == "win32",
+        reason="POSIX file permissions are not enforced on Windows",
+    )
+    def test_debug_file_permissions_are_owner_only(self, tmp_path: Path) -> None:
+        import stat
+
+        path = tmp_path / "account_debug.csv"
+
+        _write_debug_csv([{"id": 1}], path)
+
+        assert stat.S_IMODE(path.stat().st_mode) == 0o600
+
+    def test_export_writes_enable_banking_and_pocketsmith_debug_files(
+        self, tmp_path: Path, mocker
+    ) -> None:
+        account = AccountRef(
+            uid="source-uid",
+            account_id=AccountIdentification(iban="NO11111111111"),
+        )
+        session = SessionResponse(session_id="session", accounts=[account])
+        transaction = Transaction.model_validate(
+            {
+                "transaction_id": "bank-1",
+                "booking_date": "2026-09-18",
+                "transaction_amount": {"amount": "10.00", "currency": "NOK"},
+                "credit_debit_indicator": "DBIT",
+                "status": "BOOK",
+                "bank_extension": {"source": "retained"},
+            }
+        )
+        pocketsmith_transaction = PocketSmithTransaction.model_validate(
+            {
+                "id": 99,
+                "cheque_number": "persfin:existing",
+                "payee": "Existing transaction",
+                "labels": ["debug"],
+            }
+        )
+        mocker.patch(
+            "persfin.cli.get_balances", return_value=BalancesResponse(balances=[])
+        )
+        mocker.patch(
+            "persfin.cli.get_transactions",
+            return_value=TransactionsResponse(transactions=[transaction]),
+        )
+
+        def fake_sync_transactions(**kwargs):
+            callback = kwargs["existing_transactions_callback"]
+            callback([pocketsmith_transaction])
+            return PocketSmithSyncResult(
+                existing_transactions=(pocketsmith_transaction,)
+            )
+
+        mocker.patch(
+            "persfin.cli.sync_transactions", side_effect=fake_sync_transactions
+        )
+        sync_config = PocketSmithSyncConfig(
+            client=mocker.Mock(spec=PocketSmithClient),
+            transaction_account_id=42,
+            source_iban="NO11111111111",
+        )
+
+        _export_transactions_to_csv(
+            [session],
+            from_date=date(2026, 9, 1),
+            output_dir=tmp_path,
+            pocketsmith=sync_config,
+            debug=True,
+        )
+
+        with (tmp_path / "NO11111111111_debug.csv").open(
+            encoding="utf-8", newline=""
+        ) as csv_file:
+            enable_banking_rows = list(csv.DictReader(csv_file))
+        with (tmp_path / "pocketsmith_42_debug.csv").open(
+            encoding="utf-8", newline=""
+        ) as csv_file:
+            pocketsmith_rows = list(csv.DictReader(csv_file))
+
+        assert json.loads(enable_banking_rows[0]["bank_extension"]) == {
+            "source": "retained"
+        }
+        assert json.loads(pocketsmith_rows[0]["payee"]) == "Existing transaction"
+        assert json.loads(pocketsmith_rows[0]["labels"]) == ["debug"]
+
+    def test_successful_empty_response_clears_account_debug_file(
+        self, tmp_path: Path, mocker
+    ) -> None:
+        debug_path = tmp_path / "NO11111111111_debug.csv"
+        debug_path.write_text("stale data", encoding="utf-8")
+        account = AccountRef(
+            uid="source-uid",
+            account_id=AccountIdentification(iban="NO11111111111"),
+        )
+        session = SessionResponse(session_id="session", accounts=[account])
+        mocker.patch(
+            "persfin.cli.get_balances", return_value=BalancesResponse(balances=[])
+        )
+        mocker.patch(
+            "persfin.cli.get_transactions",
+            return_value=TransactionsResponse(transactions=[]),
+        )
+
+        _export_transactions_to_csv([session], output_dir=tmp_path, debug=True)
+
+        assert debug_path.read_text(encoding="utf-8") == ""
+
+    def test_later_page_failure_preserves_received_debug_records(
+        self, tmp_path: Path, mocker
+    ) -> None:
+        account = AccountRef(
+            uid="source-uid",
+            account_id=AccountIdentification(iban="NO11111111111"),
+        )
+        session = SessionResponse(session_id="session", accounts=[account])
+        transaction = Transaction.model_validate(
+            {
+                "transaction_id": "first-page",
+                "transaction_amount": {"amount": "10.00", "currency": "NOK"},
+            }
+        )
+        mocker.patch(
+            "persfin.cli.get_balances", return_value=BalancesResponse(balances=[])
+        )
+        mocker.patch(
+            "persfin.cli.get_transactions",
+            side_effect=[
+                TransactionsResponse(
+                    transactions=[transaction], continuation_key="next-page"
+                ),
+                RuntimeError("second page failed"),
+            ],
+        )
+
+        _export_transactions_to_csv([session], output_dir=tmp_path, debug=True)
+
+        with (tmp_path / "NO11111111111_debug.csv").open(
+            encoding="utf-8", newline=""
+        ) as csv_file:
+            rows = list(csv.DictReader(csv_file))
+        assert json.loads(rows[0]["transaction_id"]) == "first-page"
+
+    def test_debug_write_failure_does_not_suppress_normal_csv(
+        self, tmp_path: Path, mocker, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        account = AccountRef(
+            uid="source-uid",
+            account_id=AccountIdentification(iban="NO11111111111"),
+        )
+        session = SessionResponse(session_id="session", accounts=[account])
+        transaction = Transaction.model_validate(
+            {
+                "transaction_id": "bank-1",
+                "booking_date": "2026-09-18",
+                "transaction_amount": {"amount": "10.00", "currency": "NOK"},
+                "credit_debit_indicator": "DBIT",
+                "status": "BOOK",
+            }
+        )
+        mocker.patch(
+            "persfin.cli.get_balances", return_value=BalancesResponse(balances=[])
+        )
+        mocker.patch(
+            "persfin.cli.get_transactions",
+            return_value=TransactionsResponse(transactions=[transaction]),
+        )
+        mocker.patch("persfin.cli._write_debug_csv", side_effect=OSError("disk full"))
+
+        _export_transactions_to_csv([session], output_dir=tmp_path, debug=True)
+
+        assert (tmp_path / "NO11111111111.csv").exists()
+        assert "Could not write Enable Banking debug CSV" in capsys.readouterr().out
+
+    def test_first_page_failure_removes_stale_debug_file(
+        self, tmp_path: Path, mocker
+    ) -> None:
+        debug_path = tmp_path / "NO11111111111_debug.csv"
+        debug_path.write_text("stale data", encoding="utf-8")
+        account = AccountRef(
+            uid="source-uid",
+            account_id=AccountIdentification(iban="NO11111111111"),
+        )
+        session = SessionResponse(session_id="session", accounts=[account])
+        mocker.patch(
+            "persfin.cli.get_balances", return_value=BalancesResponse(balances=[])
+        )
+        mocker.patch(
+            "persfin.cli.get_transactions", side_effect=RuntimeError("API unavailable")
+        )
+
+        _export_transactions_to_csv([session], output_dir=tmp_path, debug=True)
+
+        assert not debug_path.exists()

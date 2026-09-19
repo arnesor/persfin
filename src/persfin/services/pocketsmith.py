@@ -1,13 +1,14 @@
 """PocketSmith API client and transaction synchronization."""
 
 import hashlib
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
 import httpx
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 from persfin.schemas.schemas import Transaction
 
@@ -28,7 +29,9 @@ class PocketSmithUser(BaseModel):
 
 
 class PocketSmithTransaction(BaseModel):
-    """Subset of a PocketSmith transaction needed for deduplication."""
+    """PocketSmith transaction retaining all fields returned by the API."""
+
+    model_config = ConfigDict(extra="allow")
 
     id: int
     cheque_number: str | None = None
@@ -42,6 +45,7 @@ class PocketSmithSyncResult:
     duplicates: int = 0
     pending: int = 0
     invalid: int = 0
+    existing_transactions: tuple[PocketSmithTransaction, ...] = ()
 
 
 class PocketSmithClient:
@@ -75,6 +79,7 @@ class PocketSmithClient:
         account_id: int,
         start_date: date | None = None,
         end_date: date | None = None,
+        on_page: Callable[[list[PocketSmithTransaction]], None] | None = None,
     ) -> list[PocketSmithTransaction]:
         """Return every accessible transaction, optionally within a date range."""
         url: str | httpx.URL = f"/transaction_accounts/{account_id}/transactions"
@@ -93,6 +98,8 @@ class PocketSmithClient:
             transactions.extend(
                 PocketSmithTransaction.model_validate(item) for item in response.json()
             )
+            if on_page is not None:
+                on_page(transactions)
             next_link = response.links.get("next")
             if next_link is None:
                 return transactions
@@ -140,11 +147,19 @@ def sync_transactions(
     transactions: list[Transaction],
     start_date: date,
     end_date: date | None = None,
+    existing_transactions_callback: (
+        Callable[[list[PocketSmithTransaction]], None] | None
+    ) = None,
 ) -> PocketSmithSyncResult:
     """Create eligible bank transactions that are not already in PocketSmith."""
     sync_end_date = end_date or date.today()
     destination = client.get_transaction_account(account_id)
-    existing = client.list_transactions(account_id, start_date, sync_end_date)
+    existing = client.list_transactions(
+        account_id,
+        start_date,
+        sync_end_date,
+        on_page=existing_transactions_callback,
+    )
     identities = {
         transaction.cheque_number
         for transaction in existing
@@ -205,6 +220,7 @@ def sync_transactions(
         duplicates=duplicates,
         pending=pending,
         invalid=invalid,
+        existing_transactions=tuple(existing),
     )
 
 

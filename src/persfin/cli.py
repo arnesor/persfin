@@ -17,11 +17,14 @@ Subsequent runs:
 """
 
 import asyncio
+import csv
 import json
 import sys
+import tempfile
 import threading
 import time
 import webbrowser
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
@@ -49,6 +52,7 @@ from persfin.services.enablebanking import (
 from persfin.services.pocketsmith import (
     PocketSmithClient,
     PocketSmithSyncResult,
+    PocketSmithTransaction,
     PocketSmithTransactionAccount,
     sync_transactions,
 )
@@ -319,7 +323,11 @@ def _normalize_account_number(value: str) -> str:
     return "".join(value.split()).upper()
 
 
-def _fetch_all_transactions(account_uid: str, date_from: str) -> list[Transaction]:
+def _fetch_all_transactions(
+    account_uid: str,
+    date_from: str,
+    on_page: Callable[[list[Transaction]], None] | None = None,
+) -> list[Transaction]:
     """Fetch every Enable Banking transaction page for an account."""
     transactions: list[Transaction] = []
     continuation_key: str | None = None
@@ -330,9 +338,59 @@ def _fetch_all_transactions(account_uid: str, date_from: str) -> list[Transactio
             continuation_key=continuation_key,
         )
         transactions.extend(response.transactions)
+        if on_page is not None:
+            on_page(transactions)
         continuation_key = response.continuation_key
         if not continuation_key:
             return transactions
+
+
+def _write_debug_csv(records: list[dict[str, object]], path: Path) -> None:
+    """Atomically write complete API records with JSON-encoded values."""
+    temporary_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            newline="",
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            dir=path.parent,
+            delete=False,
+        ) as csv_file:
+            temporary_path = Path(csv_file.name)
+            if records:
+                fieldnames = list(
+                    dict.fromkeys(field for record in records for field in record)
+                )
+                writer = csv.DictWriter(csv_file, fieldnames=fieldnames)
+                writer.writeheader()
+                writer.writerows(
+                    {
+                        field: _debug_csv_value(
+                            record[field] if field in record else _MISSING_DEBUG_VALUE
+                        )
+                        for field in fieldnames
+                    }
+                    for record in records
+                )
+        assert temporary_path is not None
+        if sys.platform != "win32":
+            temporary_path.chmod(0o600)
+        temporary_path.replace(path)
+    except Exception:
+        if temporary_path is not None:
+            temporary_path.unlink(missing_ok=True)
+        raise
+
+
+def _debug_csv_value(value: object) -> object:
+    if value is _MISSING_DEBUG_VALUE:
+        return ""
+    return json.dumps(value, ensure_ascii=False, sort_keys=True)
+
+
+_MISSING_DEBUG_VALUE = object()
 
 
 def _export_transactions_to_csv(
@@ -340,6 +398,7 @@ def _export_transactions_to_csv(
     from_date: date | None = None,
     output_dir: Path | None = None,
     pocketsmith: PocketSmithSyncConfig | None = None,
+    debug: bool = False,
 ) -> None:
     """Fetch transactions for every account, print a preview, and write one CSV per account.
 
@@ -382,6 +441,7 @@ def _export_transactions_to_csv(
         session_expired = False
         for account in session.accounts:
             uid = account.uid
+            safe_name = account.display_name.replace("/", "_").replace("\\", "_")
             account_start_date = (
                 sync_start_date
                 if source_account is not None and account is source_account
@@ -416,9 +476,40 @@ def _export_transactions_to_csv(
             # Fetch all transactions (single call, paged)
             transactions: list[Transaction] = []
             fetch_error: str | None = None
+            enable_banking_debug_path = output_dir / f"{safe_name}_debug.csv"
+            debug_snapshot_written = False
+            debug_record_count = 0
+            if debug:
+                try:
+                    enable_banking_debug_path.unlink(missing_ok=True)
+                except OSError as exc:
+                    print(f"   (Could not clear Enable Banking debug CSV: {exc})")
+
+            def write_enable_banking_debug(
+                records: list[Transaction],
+                debug_path: Path = enable_banking_debug_path,
+            ) -> None:
+                nonlocal debug_snapshot_written, debug_record_count
+                try:
+                    _write_debug_csv(
+                        [
+                            transaction.model_dump(mode="json", exclude_unset=True)
+                            for transaction in records
+                        ],
+                        debug_path,
+                    )
+                except Exception as exc:
+                    print(f"   (Could not write Enable Banking debug CSV: {exc})")
+                    return
+                debug_snapshot_written = True
+                debug_record_count = len(records)
 
             try:
-                transactions = _fetch_all_transactions(uid, date_from)
+                transactions = _fetch_all_transactions(
+                    uid,
+                    date_from,
+                    on_page=write_enable_banking_debug if debug else None,
+                )
             except Exception as exc:
                 fetch_error = str(exc)
                 if (
@@ -464,6 +555,12 @@ def _export_transactions_to_csv(
             else:
                 print("   (no transactions found in this period)")
 
+            if debug_snapshot_written:
+                print(
+                    f"   -> Wrote {debug_record_count} full Enable Banking "
+                    f"record(s) to {enable_banking_debug_path}"
+                )
+
             if session_expired:
                 break
 
@@ -487,7 +584,6 @@ def _export_transactions_to_csv(
                 .alias("amount")
             )
 
-            safe_name = account.display_name.replace("/", "_").replace("\\", "_")
             csv_path = output_dir / f"{safe_name}.csv"
             df.write_csv(csv_path)
             print(f"   -> Wrote {df.height} row(s) to {csv_path}")
@@ -498,14 +594,53 @@ def _export_transactions_to_csv(
                 and account is source_account
             ):
                 assert sync_start_date is not None
+                pocketsmith_debug_path = (
+                    output_dir
+                    / f"pocketsmith_{pocketsmith.transaction_account_id}_debug.csv"
+                )
+                pocketsmith_debug_count = 0
+                pocketsmith_debug_written = False
+                if debug:
+                    try:
+                        pocketsmith_debug_path.unlink(missing_ok=True)
+                    except OSError as exc:
+                        print(f"   (Could not clear PocketSmith debug CSV: {exc})")
+
+                def write_pocketsmith_debug(
+                    records: list[PocketSmithTransaction],
+                    debug_path: Path = pocketsmith_debug_path,
+                ) -> None:
+                    nonlocal pocketsmith_debug_count, pocketsmith_debug_written
+                    try:
+                        _write_debug_csv(
+                            [
+                                transaction.model_dump(mode="json", exclude_unset=True)
+                                for transaction in records
+                            ],
+                            debug_path,
+                        )
+                    except Exception as exc:
+                        print(f"   (Could not write PocketSmith debug CSV: {exc})")
+                        return
+                    pocketsmith_debug_count = len(records)
+                    pocketsmith_debug_written = True
+
                 result = sync_transactions(
                     client=pocketsmith.client,
                     account_id=pocketsmith.transaction_account_id,
                     account_uid=account.uid,
                     transactions=transactions,
                     start_date=sync_start_date,
+                    existing_transactions_callback=(
+                        write_pocketsmith_debug if debug else None
+                    ),
                 )
                 _print_pocketsmith_result(result)
+                if pocketsmith_debug_written:
+                    print(
+                        f"   -> Wrote {pocketsmith_debug_count} full "
+                        f"PocketSmith record(s) to {pocketsmith_debug_path}"
+                    )
 
     print(f"\n{'=' * 60}\n")
 
@@ -577,6 +712,11 @@ def run_cli(
         False,
         "--pocketsmith",
         help="Upload booked transactions from the configured bank account to PocketSmith.",
+    ),
+    debug: bool = typer.Option(
+        False,
+        "--debug",
+        help="Write full Enable Banking and PocketSmith transaction CSV files.",
     ),
 ) -> None:
     """Run the CLI."""
@@ -657,7 +797,7 @@ def run_cli(
     sessions = store.all()
     if not pocketsmith:
         _export_transactions_to_csv(
-            sessions, from_date=parsed_date, output_dir=_DATA_DIR
+            sessions, from_date=parsed_date, output_dir=_DATA_DIR, debug=debug
         )
         return
 
@@ -704,6 +844,7 @@ def run_cli(
             from_date=parsed_date,
             output_dir=_DATA_DIR,
             pocketsmith=sync_config,
+            debug=debug,
         )
 
 

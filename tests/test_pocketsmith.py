@@ -10,6 +10,7 @@ import pytest
 from persfin.schemas.schemas import Amount, Transaction
 from persfin.services.pocketsmith import (
     PocketSmithClient,
+    PocketSmithTransaction,
     sync_transactions,
     transaction_identity,
 )
@@ -93,7 +94,15 @@ class TestPocketSmithClient:
                 headers={
                     "Link": '<https://api.pocketsmith.test/v2/transaction_accounts/42/transactions?page=2>; rel="next"'
                 },
-                json=[{"id": 1, "cheque_number": "a"}],
+                json=[
+                    {
+                        "id": 1,
+                        "cheque_number": "a",
+                        "payee": "Coffee shop",
+                        "labels": ["food", "coffee"],
+                        "transaction_account": {"id": 42, "name": "Daily"},
+                    }
+                ],
             )
 
         with _client(httpx.MockTransport(handler)) as http_client:
@@ -105,6 +114,10 @@ class TestPocketSmithClient:
         assert requests[0].url.params["start_date"] == "2026-09-01"
         assert requests[0].url.params["end_date"] == "2026-09-19"
         assert requests[0].url.params["per_page"] == "1000"
+        first = transactions[0].model_dump(mode="json")
+        assert first["payee"] == "Coffee shop"
+        assert first["labels"] == ["food", "coffee"]
+        assert first["transaction_account"] == {"id": 42, "name": "Daily"}
 
     def test_rejects_cross_origin_pagination_link(self) -> None:
         def handler(request: httpx.Request) -> httpx.Response:
@@ -119,6 +132,28 @@ class TestPocketSmithClient:
         with _client(httpx.MockTransport(handler)) as http_client:
             with pytest.raises(ValueError, match="changed origin"):
                 PocketSmithClient(http_client).list_transactions(42)
+
+    def test_page_callback_preserves_records_before_later_failure(self) -> None:
+        snapshots: list[list[PocketSmithTransaction]] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.params.get("page") == "2":
+                return httpx.Response(503, json={"error": "unavailable"})
+            return httpx.Response(
+                200,
+                headers={
+                    "Link": '<https://api.pocketsmith.test/v2/transaction_accounts/42/transactions?page=2>; rel="next"'
+                },
+                json=[{"id": 1, "payee": "Received first"}],
+            )
+
+        with _client(httpx.MockTransport(handler)) as http_client:
+            with pytest.raises(httpx.HTTPStatusError):
+                PocketSmithClient(http_client).list_transactions(
+                    42, on_page=lambda records: snapshots.append(records.copy())
+                )
+
+        assert snapshots[0][0].model_dump(mode="json")["payee"] == "Received first"
 
 
 class TestSyncTransactions:

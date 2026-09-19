@@ -121,6 +121,24 @@ skip transactions already created, including after a partially failed run.
 `POCKETSMITH_TRANSACTION_ACCOUNT_ID` remains available as an optional override
 when automatic matching should not be used.
 
+### Debug transaction exports
+
+Use `--debug` to write complete API transaction records in addition to the
+normal reduced CSV exports:
+
+```bash
+uv run persfin-cli --debug
+uv run persfin-cli --pocketsmith --debug
+```
+
+Enable Banking records are written once per source account as
+`data/<account>_debug.csv`. With PocketSmith synchronization enabled, every
+PocketSmith transaction read for duplicate detection is written to
+`data/pocketsmith_<transaction-account-id>_debug.csv`. Nested arrays and objects
+are stored as JSON within their CSV cells; scalar values are JSON-encoded too so
+empty, null, and missing values remain distinguishable. These files contain
+sensitive raw financial data and should not be shared.
+
 Sample session:
 
 ```
