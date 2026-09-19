@@ -242,11 +242,14 @@ def _find_source_account(
     sessions: list[SessionResponse], source_iban: str
 ) -> AccountRef:
     """Find exactly one account whose primary IBAN matches the source IBAN."""
+    normalized_iban = _normalize_account_number(source_iban)
     matches = [
         account
         for session in sessions
         for account in session.accounts
-        if account.account_id is not None and account.account_id.iban == source_iban
+        if account.account_id is not None
+        and account.account_id.iban is not None
+        and _normalize_account_number(account.account_id.iban) == normalized_iban
     ]
     if not matches:
         raise ValueError(
@@ -271,12 +274,12 @@ def _select_pocketsmith_account(
     accounts: list[PocketSmithTransactionAccount], source_iban: str
 ) -> int:
     """Automatically match an IBAN or prompt for a PocketSmith account."""
-    normalized_iban = "".join(source_iban.split()).upper()
+    normalized_iban = _normalize_account_number(source_iban)
     matches = [
         account
         for account in accounts
         if account.number is not None
-        and "".join(account.number.split()).upper() == normalized_iban
+        and _normalize_account_number(account.number) == normalized_iban
     ]
     if len(matches) == 1:
         account = matches[0]
@@ -310,6 +313,10 @@ def _select_pocketsmith_account(
         if 1 <= selected <= len(accounts):
             return accounts[selected - 1].id
         print(f"  Please enter a number between 1 and {len(accounts)}.")
+
+
+def _normalize_account_number(value: str) -> str:
+    return "".join(value.split()).upper()
 
 
 def _fetch_all_transactions(account_uid: str, date_from: str) -> list[Transaction]:

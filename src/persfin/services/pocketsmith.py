@@ -144,12 +144,13 @@ def sync_transactions(
     """Create eligible bank transactions that are not already in PocketSmith."""
     sync_end_date = end_date or date.today()
     destination = client.get_transaction_account(account_id)
-    existing = client.list_transactions(account_id)
+    existing = client.list_transactions(account_id, start_date, sync_end_date)
     identities = {
         transaction.cheque_number
         for transaction in existing
         if transaction.cheque_number is not None
     }
+    fallback_occurrences: dict[str, int] = {}
     created = duplicates = pending = invalid = 0
 
     for transaction in transactions:
@@ -177,6 +178,11 @@ def sync_transactions(
             continue
 
         identity = transaction_identity(transaction, account_uid)
+        if transaction.transaction_id is None and transaction.entry_reference is None:
+            occurrence = fallback_occurrences.get(identity, 0) + 1
+            fallback_occurrences[identity] = occurrence
+            if occurrence > 1:
+                identity = f"{identity}:{occurrence}"
         if identity in identities:
             duplicates += 1
             continue

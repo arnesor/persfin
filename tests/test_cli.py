@@ -278,6 +278,15 @@ class TestPocketSmithAccountSelection:
 
         assert _find_source_account(sessions, "NO11111111111") is account
 
+    def test_normalizes_source_iban(self) -> None:
+        account = AccountRef(
+            uid="source-uid",
+            account_id=AccountIdentification(iban="NO11 1111 11111"),
+        )
+        sessions = [SessionResponse(session_id="session", accounts=[account])]
+
+        assert _find_source_account(sessions, "no11111111111") is account
+
     def test_does_not_match_uid_or_missing_iban(self) -> None:
         account = AccountRef(uid="NO11111111111")
         sessions = [SessionResponse(session_id="session", accounts=[account])]

@@ -124,11 +124,13 @@ class TestPocketSmithClient:
 class TestSyncTransactions:
     def test_maps_and_creates_booked_transaction(self) -> None:
         posted_payloads: list[dict[str, Any]] = []
+        list_requests: list[httpx.Request] = []
 
         def handler(request: httpx.Request) -> httpx.Response:
             if request.method == "GET" and request.url.path.endswith("/42"):
                 return httpx.Response(200, json={"id": 42, "currency_code": "NOK"})
             if request.method == "GET":
+                list_requests.append(request)
                 return httpx.Response(200, json=[])
             payload = json.loads(request.content)
             posted_payloads.append(payload)
@@ -155,6 +157,8 @@ class TestSyncTransactions:
                 "note": "Card purchase",
             }
         ]
+        assert list_requests[0].url.params["start_date"] == "2026-09-01"
+        assert list_requests[0].url.params["end_date"] == "2026-09-19"
 
     def test_skips_duplicate_pending_invalid_and_wrong_currency(self) -> None:
         def handler(request: httpx.Request) -> httpx.Response:
@@ -295,3 +299,47 @@ class TestSyncTransactions:
         )
 
         assert transaction_identity(first, "uid") == transaction_identity(second, "uid")
+
+    def test_creates_identical_identifierless_transactions_as_occurrences(self) -> None:
+        posted_payloads: list[dict[str, Any]] = []
+        remote_transactions: list[dict[str, Any]] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.method == "GET" and request.url.path.endswith("/42"):
+                return httpx.Response(200, json={"id": 42, "currency_code": "NOK"})
+            if request.method == "GET":
+                return httpx.Response(200, json=remote_transactions)
+            payload = json.loads(request.content)
+            posted_payloads.append(payload)
+            created = {"id": len(posted_payloads), **payload}
+            remote_transactions.append(created)
+            return httpx.Response(201, json=created)
+
+        transaction = _transaction(transaction_id=None, entry_reference=None)
+        base_identity = transaction_identity(transaction, "uid")
+        with _client(httpx.MockTransport(handler)) as http_client:
+            result = sync_transactions(
+                PocketSmithClient(http_client),
+                account_id=42,
+                account_uid="uid",
+                transactions=[transaction, transaction.model_copy(deep=True)],
+                start_date=date(2026, 9, 1),
+                end_date=date(2026, 9, 19),
+            )
+            retry_result = sync_transactions(
+                PocketSmithClient(http_client),
+                account_id=42,
+                account_uid="uid",
+                transactions=[transaction, transaction.model_copy(deep=True)],
+                start_date=date(2026, 9, 1),
+                end_date=date(2026, 9, 19),
+            )
+
+        assert result.created == 2
+        assert result.duplicates == 0
+        assert retry_result.created == 0
+        assert retry_result.duplicates == 2
+        assert [payload["cheque_number"] for payload in posted_payloads] == [
+            base_identity,
+            f"{base_identity}:2",
+        ]
