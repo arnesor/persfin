@@ -22,6 +22,7 @@ from persfin.cli import (
     _find_source_account,
     _load_session_cache,
     _pocketsmith_start_date,
+    _print_pocketsmith_result,
     _save_session_cache,
     _select_pocketsmith_account,
     _validate_from_date,
@@ -394,6 +395,64 @@ class TestPocketSmithDestinationSelection:
             _select_pocketsmith_account([], "NO11111111111")
 
 
+class TestPocketSmithOutput:
+    def test_prints_stored_count_and_date_range(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        _print_pocketsmith_result(
+            PocketSmithSyncResult(
+                created=3,
+                first_created_date=date(2026, 9, 5),
+                last_created_date=date(2026, 9, 18),
+            )
+        )
+
+        assert (
+            "PocketSmith: 3 stored (first date: 2026-09-05, "
+            "last date: 2026-09-18)" in capsys.readouterr().out
+        )
+
+    def test_prints_zero_count_without_dates(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        _print_pocketsmith_result(PocketSmithSyncResult())
+
+        assert (
+            "PocketSmith: 0 stored (first date: n/a, last date: n/a)"
+            in capsys.readouterr().out
+        )
+
+    def test_empty_source_account_still_prints_zero_result(
+        self, tmp_path: Path, mocker, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        account = AccountRef(
+            uid="source-uid",
+            account_id=AccountIdentification(iban="NO11111111111"),
+        )
+        session = SessionResponse(session_id="session", accounts=[account])
+        mocker.patch(
+            "persfin.cli.get_balances", return_value=BalancesResponse(balances=[])
+        )
+        mocker.patch(
+            "persfin.cli.get_transactions",
+            return_value=TransactionsResponse(transactions=[]),
+        )
+        sync_config = PocketSmithSyncConfig(
+            client=mocker.Mock(spec=PocketSmithClient),
+            transaction_account_id=42,
+            source_iban="NO11111111111",
+        )
+
+        _export_transactions_to_csv(
+            [session], output_dir=tmp_path, pocketsmith=sync_config
+        )
+
+        assert (
+            "PocketSmith: 0 stored (first date: n/a, last date: n/a)"
+            in capsys.readouterr().out
+        )
+
+
 class TestDebugCsv:
     def test_writes_all_fields_and_json_encodes_nested_values(
         self, tmp_path: Path
@@ -473,7 +532,7 @@ class TestDebugCsv:
         pocketsmith_transaction = PocketSmithTransaction.model_validate(
             {
                 "id": 99,
-                "cheque_number": "persfin:existing",
+                "memo": "persfin:existing",
                 "payee": "Existing transaction",
                 "labels": ["debug"],
             }

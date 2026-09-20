@@ -569,6 +569,15 @@ def _export_transactions_to_csv(
                 print(
                     f"  (No transactions fetched for {account.display_name} - skipping CSV)"
                 )
+                if (
+                    pocketsmith is not None
+                    and source_account is not None
+                    and account is source_account
+                ):
+                    if fetch_error is None:
+                        _print_pocketsmith_result(PocketSmithSyncResult())
+                    else:
+                        print("   -> PocketSmith: synchronization skipped")
                 continue
 
             df = pl.DataFrame(rows, infer_schema_length=len(rows))
@@ -646,9 +655,20 @@ def _export_transactions_to_csv(
 
 
 def _print_pocketsmith_result(result: PocketSmithSyncResult) -> None:
+    first_created_date = (
+        result.first_created_date.isoformat()
+        if result.first_created_date is not None
+        else "n/a"
+    )
+    last_created_date = (
+        result.last_created_date.isoformat()
+        if result.last_created_date is not None
+        else "n/a"
+    )
     print(
         "   -> PocketSmith: "
-        f"{result.created} created, "
+        f"{result.created} stored "
+        f"(first date: {first_created_date}, last date: {last_created_date}), "
         f"{result.duplicates} duplicate(s), "
         f"{result.pending} pending, "
         f"{result.invalid} invalid"

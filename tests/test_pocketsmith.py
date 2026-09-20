@@ -88,7 +88,7 @@ class TestPocketSmithClient:
         def handler(request: httpx.Request) -> httpx.Response:
             requests.append(request)
             if request.url.params.get("page") == "2":
-                return httpx.Response(200, json=[{"id": 2, "cheque_number": "b"}])
+                return httpx.Response(200, json=[{"id": 2, "memo": "b"}])
             return httpx.Response(
                 200,
                 headers={
@@ -97,7 +97,7 @@ class TestPocketSmithClient:
                 json=[
                     {
                         "id": 1,
-                        "cheque_number": "a",
+                        "memo": "a",
                         "payee": "Coffee shop",
                         "labels": ["food", "coffee"],
                         "transaction_account": {"id": 42, "name": "Daily"},
@@ -157,7 +157,7 @@ class TestPocketSmithClient:
 
 
 class TestSyncTransactions:
-    def test_maps_and_creates_booked_transaction(self) -> None:
+    def test_maps_booked_transactions_and_reports_created_date_range(self) -> None:
         posted_payloads: list[dict[str, Any]] = []
         list_requests: list[httpx.Request] = []
 
@@ -172,25 +172,38 @@ class TestSyncTransactions:
             return httpx.Response(201, json={"id": 99, **payload})
 
         transaction = _transaction(additional_information="Card purchase")
+        older_transaction = _transaction(
+            transaction_id="bank-older",
+            booking_date="2026-09-05",
+            additional_information=None,
+        )
         with _client(httpx.MockTransport(handler)) as http_client:
             result = sync_transactions(
                 PocketSmithClient(http_client),
                 account_id=42,
                 account_uid="bank-account-uid",
-                transactions=[transaction],
+                transactions=[transaction, older_transaction],
                 start_date=date(2026, 9, 1),
                 end_date=date(2026, 9, 19),
             )
 
-        assert result.created == 1
+        assert result.created == 2
+        assert result.first_created_date == date(2026, 9, 5)
+        assert result.last_created_date == date(2026, 9, 18)
         assert posted_payloads == [
             {
                 "payee": "Coffee shop",
                 "amount": -12.5,
                 "date": "2026-09-18",
-                "cheque_number": "persfin:bank-123",
+                "memo": "persfin:bank-123",
                 "note": "Card purchase",
-            }
+            },
+            {
+                "payee": "Coffee shop",
+                "amount": -12.5,
+                "date": "2026-09-05",
+                "memo": "persfin:bank-older",
+            },
         ]
         assert list_requests[0].url.params["start_date"] == "2026-09-01"
         assert list_requests[0].url.params["end_date"] == "2026-09-19"
@@ -201,7 +214,13 @@ class TestSyncTransactions:
                 return httpx.Response(200, json={"id": 42, "currency_code": "NOK"})
             if request.method == "GET":
                 return httpx.Response(
-                    200, json=[{"id": 1, "cheque_number": "persfin:duplicate"}]
+                    200,
+                    json=[
+                        {
+                            "id": 1,
+                            "memo": "persfin:duplicate",
+                        }
+                    ],
                 )
             raise AssertionError("No transactions should be created")
 
@@ -228,6 +247,8 @@ class TestSyncTransactions:
         assert result.pending == 1
         assert result.invalid == 2
         assert result.created == 0
+        assert result.first_created_date is None
+        assert result.last_created_date is None
 
     def test_credit_uses_debtor_as_payee(self) -> None:
         payloads: list[dict[str, Any]] = []
@@ -272,7 +293,7 @@ class TestSyncTransactions:
             if request.method == "GET":
                 return httpx.Response(200, json=remote_transactions)
             payload = json.loads(request.content)
-            if payload["cheque_number"] == "persfin:second" and fail_second:
+            if payload["memo"] == "persfin:second" and fail_second:
                 fail_second = False
                 return httpx.Response(503, json={"error": "try later"})
             created = {"id": len(remote_transactions) + 1, **payload}
@@ -305,7 +326,7 @@ class TestSyncTransactions:
 
         assert result.duplicates == 1
         assert result.created == 1
-        assert [item["cheque_number"] for item in remote_transactions] == [
+        assert [item["memo"] for item in remote_transactions] == [
             "persfin:first",
             "persfin:second",
         ]
@@ -374,7 +395,7 @@ class TestSyncTransactions:
         assert result.duplicates == 0
         assert retry_result.created == 0
         assert retry_result.duplicates == 2
-        assert [payload["cheque_number"] for payload in posted_payloads] == [
+        assert [payload["memo"] for payload in posted_payloads] == [
             base_identity,
             f"{base_identity}:2",
         ]

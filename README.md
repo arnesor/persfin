@@ -115,9 +115,9 @@ uv run persfin-cli --pocketsmith
 
 You can restrict a run further with `--from-date YYYY-MM-DD`. When a cutover is
 configured, the later of that date and `POCKETSMITH_CUTOVER_DATE` is used.
-Uploaded transactions retain a
-stable Enable Banking identity in PocketSmith's cheque-number field, so retries
-skip transactions already created, including after a partially failed run.
+Uploaded transactions retain a stable Enable Banking identity in PocketSmith's
+memo field, so retries skip transactions already created, including after a
+partially failed run.
 `POCKETSMITH_TRANSACTION_ACCOUNT_ID` remains available as an optional override
 when automatic matching should not be used.
 

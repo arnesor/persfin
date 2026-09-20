@@ -34,7 +34,7 @@ class PocketSmithTransaction(BaseModel):
     model_config = ConfigDict(extra="allow")
 
     id: int
-    cheque_number: str | None = None
+    memo: str | None = None
 
 
 @dataclass(frozen=True)
@@ -42,6 +42,8 @@ class PocketSmithSyncResult:
     """Counts produced by a PocketSmith synchronization."""
 
     created: int = 0
+    first_created_date: date | None = None
+    last_created_date: date | None = None
     duplicates: int = 0
     pending: int = 0
     invalid: int = 0
@@ -119,9 +121,8 @@ class PocketSmithClient:
         response.raise_for_status()
         return PocketSmithTransaction.model_validate(response.json())
 
-
 def transaction_identity(transaction: Transaction, account_uid: str) -> str:
-    """Return a stable PocketSmith cheque number for a bank transaction."""
+    """Return a stable PocketSmith memo for a bank transaction."""
     source_id = transaction.transaction_id or transaction.entry_reference
     if source_id:
         return f"persfin:{source_id}"
@@ -160,12 +161,9 @@ def sync_transactions(
         sync_end_date,
         on_page=existing_transactions_callback,
     )
-    identities = {
-        transaction.cheque_number
-        for transaction in existing
-        if transaction.cheque_number is not None
-    }
+    identities = {transaction.memo for transaction in existing if transaction.memo}
     fallback_occurrences: dict[str, int] = {}
+    created_dates: list[date] = []
     created = duplicates = pending = invalid = 0
 
     for transaction in transactions:
@@ -206,17 +204,20 @@ def sync_transactions(
             "payee": _payee(transaction),
             "amount": float(signed_amount),
             "date": transaction_date.isoformat(),
-            "cheque_number": identity,
+            "memo": identity,
         }
         if transaction.additional_information:
             payload["note"] = transaction.additional_information
 
         client.create_transaction(account_id, payload)
         identities.add(identity)
+        created_dates.append(transaction_date)
         created += 1
 
     return PocketSmithSyncResult(
         created=created,
+        first_created_date=min(created_dates) if created_dates else None,
+        last_created_date=max(created_dates) if created_dates else None,
         duplicates=duplicates,
         pending=pending,
         invalid=invalid,
