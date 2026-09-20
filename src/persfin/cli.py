@@ -69,6 +69,7 @@ from persfin.services.pocketsmith import (
     PocketSmithTransaction,
     PocketSmithTransactionAccount,
     sync_transactions,
+    transaction_description,
 )
 
 # ── Constants ─────────────────────────────────────────────────────────────────
@@ -706,9 +707,7 @@ def _export_transactions_to_csv(
                     "credit_debit_indicator": transaction.credit_debit_indicator,
                     "status": transaction.status,
                     "remittance_information": (
-                        "|".join(transaction.remittance_information)
-                        if transaction.remittance_information
-                        else None
+                        transaction_description(transaction)
                     ),
                 }
                 for transaction in transactions

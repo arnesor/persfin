@@ -361,6 +361,45 @@ class TestPocketSmithOutput:
             in capsys.readouterr().out
         )
 
+    def test_csv_uses_enriched_transaction_description(
+        self, tmp_path: Path, mocker
+    ) -> None:
+        account = AccountRef(
+            uid="source-uid",
+            account_id=AccountIdentification(iban="NO11111111111"),
+        )
+        transaction = Transaction.model_validate(
+            {
+                "booking_date": "2026-09-13",
+                "transaction_amount": {"amount": "2457.00", "currency": "NOK"},
+                "credit_debit_indicator": "DBIT",
+                "status": "BOOK",
+                "remittance_information": ["Lønn"],
+                "creditor_account": {
+                    "other": {"identification": "95231670387"}
+                },
+            }
+        )
+        mocker.patch(
+            "persfin.cli.get_balances", return_value=BalancesResponse(balances=[])
+        )
+        mocker.patch(
+            "persfin.cli.get_transactions",
+            return_value=TransactionsResponse(transactions=[transaction]),
+        )
+
+        _export_transactions_to_csv(
+            [SessionResponse(session_id="session", accounts=[account])],
+            from_date=date(2026, 9, 1),
+            output_dir=tmp_path,
+        )
+
+        with (tmp_path / "NO11111111111.csv").open(
+            encoding="utf-8", newline=""
+        ) as csv_file:
+            row = next(csv.DictReader(csv_file))
+        assert row["remittance_information"] == "Lønn | 95231670387"
+
 
 class TestDebugCsv:
     def test_writes_all_fields_and_json_encodes_nested_values(

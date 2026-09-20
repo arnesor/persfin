@@ -12,6 +12,7 @@ from persfin.services.pocketsmith import (
     PocketSmithClient,
     PocketSmithTransaction,
     sync_transactions,
+    transaction_description,
     transaction_identity,
 )
 
@@ -171,7 +172,10 @@ class TestSyncTransactions:
             posted_payloads.append(payload)
             return httpx.Response(201, json={"id": 99, **payload})
 
-        transaction = _transaction(additional_information="Card purchase")
+        transaction = _transaction(
+            additional_information="Card purchase",
+            creditor_account={"other": {"identification": "95231670387"}},
+        )
         older_transaction = _transaction(
             transaction_id="bank-older",
             booking_date="2026-09-05",
@@ -192,7 +196,7 @@ class TestSyncTransactions:
         assert result.last_created_date == date(2026, 9, 18)
         assert posted_payloads == [
             {
-                "payee": "Coffee shop",
+                "payee": "Coffee shop | 95231670387",
                 "amount": -12.5,
                 "date": "2026-09-18",
                 "memo": "persfin:bank-123",
@@ -282,6 +286,59 @@ class TestSyncTransactions:
         assert payloads[0]["payee"] == "Employer"
         assert payloads[0]["amount"] == 100.0
 
+    def test_builds_description_from_remittance_and_debit_counterparty(self) -> None:
+        transaction = _transaction(
+            remittance_information=["Aftenposten Digital"],
+            creditor_name="PAYEX NORGE AS",
+            creditor_account={"other": {"identification": "81016080608"}},
+        )
+
+        assert transaction_description(transaction) == (
+            "Aftenposten Digital | PAYEX NORGE AS (81016080608)"
+        )
+
+    def test_adds_account_without_repeating_counterparty_name(self) -> None:
+        transaction = _transaction(
+            remittance_information=["Til: Synne Sørli"],
+            creditor_name="Synne Sørli",
+            creditor_account={"other": {"identification": "18133423970"}},
+        )
+
+        assert transaction_description(transaction) == (
+            "Til: Synne Sørli | 18133423970"
+        )
+
+    def test_salary_transfer_keeps_message_and_account(self) -> None:
+        transaction = _transaction(
+            remittance_information=["Lønn"],
+            creditor_name=None,
+            creditor_account={"other": {"identification": "95231670387"}},
+        )
+
+        assert transaction_description(transaction) == "Lønn | 95231670387"
+
+    def test_credit_uses_debtor_account_and_does_not_repeat_name(self) -> None:
+        transaction = _transaction(
+            credit_debit_indicator="CRDT",
+            remittance_information=["Fra: STATISTISK SENTRALBYR$"],
+            debtor_name="STATISTISK SENTRALBYR$",
+            debtor_account={"other": {"identification": "63450531032"}},
+        )
+
+        assert transaction_description(transaction) == (
+            "Fra: STATISTISK SENTRALBYR$ | 63450531032"
+        )
+
+    def test_does_not_repeat_formatted_account_in_remittance(self) -> None:
+        transaction = _transaction(
+            remittance_information=["Til: 9523.16.70387 Betalt: 14.09.26"],
+            creditor_account={"other": {"identification": "95231670387"}},
+        )
+
+        assert transaction_description(transaction) == (
+            "Til: 9523.16.70387 Betalt: 14.09.26"
+        )
+
     def test_partial_failure_can_be_retried_without_recreating_success(self) -> None:
         remote_transactions: list[dict[str, Any]] = []
         fail_second = True
@@ -339,6 +396,20 @@ class TestSyncTransactions:
 
         assert first == second
         assert first.startswith("persfin:sha256:")
+
+    def test_counterparty_enrichment_does_not_change_fallback_identity(self) -> None:
+        transaction = _transaction(transaction_id=None, entry_reference=None)
+        enriched = transaction.model_copy(
+            update={
+                "creditor_account": {
+                    "other": {"identification": "95231670387"}
+                }
+            }
+        )
+
+        assert transaction_identity(transaction, "uid") == transaction_identity(
+            enriched, "uid"
+        )
 
     def test_fallback_identity_canonicalizes_amount_and_payee_spacing(self) -> None:
         first = _transaction(

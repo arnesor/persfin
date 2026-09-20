@@ -10,7 +10,7 @@ from typing import Any
 import httpx
 from pydantic import BaseModel, ConfigDict
 
-from persfin.schemas.schemas import Transaction
+from persfin.schemas.schemas import AccountIdentification, Transaction
 
 
 class PocketSmithTransactionAccount(BaseModel):
@@ -134,7 +134,7 @@ def transaction_identity(transaction: Transaction, account_uid: str) -> str:
             format(Decimal(transaction.transaction_amount.amount).normalize(), "f"),
             transaction.transaction_amount.currency.upper(),
             transaction.credit_debit_indicator or "",
-            " ".join(_payee(transaction).split()),
+            " ".join(_identity_payee(transaction).split()),
         )
     )
     digest = hashlib.sha256(raw_identity.encode()).hexdigest()
@@ -201,7 +201,7 @@ def sync_transactions(
             continue
 
         payload: dict[str, Any] = {
-            "payee": _payee(transaction),
+            "payee": transaction_description(transaction),
             "amount": float(signed_amount),
             "date": transaction_date.isoformat(),
             "memo": identity,
@@ -234,7 +234,47 @@ def _signed_amount(transaction: Transaction) -> Decimal:
     raise ValueError("Unknown credit/debit indicator")
 
 
-def _payee(transaction: Transaction) -> str:
+def transaction_description(transaction: Transaction) -> str:
+    """Combine remittance and directional counterparty details for PocketSmith."""
+    parts = [
+        value.strip()
+        for value in transaction.remittance_information or []
+        if value.strip()
+    ]
+    if transaction.credit_debit_indicator == "DBIT":
+        name = transaction.creditor_name
+        account = _account_number(transaction.creditor_account)
+    elif transaction.credit_debit_indicator == "CRDT":
+        name = transaction.debtor_name
+        account = _account_number(transaction.debtor_account)
+    else:
+        name = transaction.creditor_name or transaction.debtor_name
+        account = _account_number(
+            transaction.creditor_account or transaction.debtor_account
+        )
+    if name is None and account is None:
+        name = transaction.creditor_name or transaction.debtor_name
+
+    existing = _searchable(" ".join(parts))
+    name_missing = bool(name and _searchable(name) not in existing)
+    account_missing = bool(account and _searchable(account) not in existing)
+    if name_missing and account_missing:
+        assert name is not None and account is not None
+        parts.append(f"{name} ({account})")
+    elif name_missing:
+        assert name is not None
+        parts.append(name)
+    elif account_missing:
+        assert account is not None
+        parts.append(account)
+
+    if parts:
+        return " | ".join(parts)
+    return transaction.additional_information or "Unknown payee"
+
+
+def _identity_payee(transaction: Transaction) -> str:
+    """Return the legacy payee text used by persisted fallback identities."""
     if transaction.remittance_information:
         return " | ".join(transaction.remittance_information)
     if transaction.credit_debit_indicator == "DBIT" and transaction.creditor_name:
@@ -247,6 +287,22 @@ def _payee(transaction: Transaction) -> str:
         or transaction.additional_information
         or "Unknown payee"
     )
+
+
+def _account_number(account: AccountIdentification | None) -> str | None:
+    if account is None:
+        return None
+    if account.iban:
+        return account.iban
+    if isinstance(account.other, dict):
+        identification = account.other.get("identification")
+        return identification if isinstance(identification, str) else None
+    identification = getattr(account.other, "identification", None)
+    return identification if isinstance(identification, str) else None
+
+
+def _searchable(value: str) -> str:
+    return "".join(character for character in value.casefold() if character.isalnum())
 
 
 def _origin(url: httpx.URL) -> tuple[str, str, int | None]:
