@@ -26,8 +26,6 @@ class Settings(BaseSettings):
 
     # PocketSmith is optional and only required by ``persfin-cli --pocketsmith``.
     pocketsmith_developer_key: SecretStr | None = None
-    pocketsmith_transaction_account_id: int | None = None
-    pocketsmith_source_iban: str = "NO11111111111"
     pocketsmith_cutover_date: date | None = None
     pocketsmith_api_origin: str = "https://api.pocketsmith.com/v2"
 

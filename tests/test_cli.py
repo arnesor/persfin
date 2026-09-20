@@ -19,12 +19,10 @@ from persfin.cli import (
     PocketSmithSyncConfig,
     _cache_key,
     _export_transactions_to_csv,
-    _find_source_account,
     _load_session_cache,
     _pocketsmith_start_date,
     _print_pocketsmith_result,
     _save_session_cache,
-    _select_pocketsmith_account,
     _validate_from_date,
     _write_debug_csv,
 )
@@ -41,7 +39,6 @@ from persfin.services.pocketsmith import (
     PocketSmithClient,
     PocketSmithSyncResult,
     PocketSmithTransaction,
-    PocketSmithTransactionAccount,
 )
 
 # ── Fixtures ──────────────────────────────────────────────────────────────────
@@ -281,45 +278,7 @@ class TestValidateFromDate:
             _validate_from_date("2023-02-30")
 
 
-class TestPocketSmithAccountSelection:
-    def test_finds_account_by_primary_iban(self) -> None:
-        account = AccountRef(
-            uid="source-uid",
-            account_id=AccountIdentification(iban="NO11111111111"),
-        )
-        sessions = [SessionResponse(session_id="session", accounts=[account])]
-
-        assert _find_source_account(sessions, "NO11111111111") is account
-
-    def test_normalizes_source_iban(self) -> None:
-        account = AccountRef(
-            uid="source-uid",
-            account_id=AccountIdentification(iban="NO11 1111 11111"),
-        )
-        sessions = [SessionResponse(session_id="session", accounts=[account])]
-
-        assert _find_source_account(sessions, "no11111111111") is account
-
-    def test_does_not_match_uid_or_missing_iban(self) -> None:
-        account = AccountRef(uid="NO11111111111")
-        sessions = [SessionResponse(session_id="session", accounts=[account])]
-
-        with pytest.raises(ValueError, match="was not found"):
-            _find_source_account(sessions, "NO11111111111")
-
-    def test_rejects_duplicate_matches(self) -> None:
-        accounts = [
-            AccountRef(
-                uid=f"uid-{index}",
-                account_id=AccountIdentification(iban="NO11111111111"),
-            )
-            for index in range(2)
-        ]
-        sessions = [SessionResponse(session_id="session", accounts=accounts)]
-
-        with pytest.raises(ValueError, match="multiple sessions"):
-            _find_source_account(sessions, "NO11111111111")
-
+class TestPocketSmithStartDate:
     def test_uses_cutover_without_cli_date(self) -> None:
         cutover = date(2026, 9, 1)
 
@@ -344,71 +303,6 @@ class TestPocketSmithAccountSelection:
         default = date(2026, 6, 1)
 
         assert _pocketsmith_start_date(None, None, default) == default
-
-
-class TestPocketSmithDestinationSelection:
-    @staticmethod
-    def _account(
-        account_id: int, name: str, number: str | None
-    ) -> PocketSmithTransactionAccount:
-        return PocketSmithTransactionAccount(
-            id=account_id,
-            name=name,
-            number=number,
-            currency_code="NOK",
-        )
-
-    def test_automatically_matches_iban(self) -> None:
-        accounts = [
-            self._account(1, "Savings", "NO22222222222"),
-            self._account(2, "Daily", "NO11111111111"),
-        ]
-
-        assert _select_pocketsmith_account(accounts, "NO11111111111") == 2
-
-    def test_normalizes_spaces_and_case_when_matching(self) -> None:
-        accounts = [self._account(42, "Daily", "no11 1111 11111")]
-
-        assert _select_pocketsmith_account(accounts, "NO11111111111") == 42
-
-    def test_matches_iban_account_name_when_number_is_not_set(self) -> None:
-        accounts = [
-            self._account(1, "Savings", None),
-            self._account(2, "NO11111111111", None),
-        ]
-
-        assert _select_pocketsmith_account(accounts, "NO11111111111") == 2
-
-    def test_prefers_account_number_over_matching_name(self) -> None:
-        accounts = [
-            self._account(1, "NO11111111111", None),
-            self._account(2, "Daily", "NO11111111111"),
-        ]
-
-        assert _select_pocketsmith_account(accounts, "NO11111111111") == 2
-
-    def test_prompts_when_no_account_matches(
-        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        accounts = [
-            self._account(10, "Savings", "NO22222222222"),
-            self._account(20, "Daily", None),
-        ]
-        answers = iter(["invalid", "3", "2"])
-        monkeypatch.setattr("builtins.input", lambda _: next(answers))
-
-        selected = _select_pocketsmith_account(accounts, "NO11111111111")
-
-        assert selected == 20
-        output = capsys.readouterr().out
-        assert "Savings" in output
-        assert "NO22222222222" in output
-        assert "Daily" in output
-        assert "id: 20" in output
-
-    def test_rejects_empty_account_list(self) -> None:
-        with pytest.raises(ValueError, match="No PocketSmith transaction accounts"):
-            _select_pocketsmith_account([], "NO11111111111")
 
 
 class TestPocketSmithOutput:
@@ -455,8 +349,7 @@ class TestPocketSmithOutput:
         )
         sync_config = PocketSmithSyncConfig(
             client=mocker.Mock(spec=PocketSmithClient),
-            transaction_account_id=42,
-            source_iban="NO11111111111",
+            mappings={"NO11111111111": 42},
         )
 
         _export_transactions_to_csv(
@@ -573,8 +466,7 @@ class TestDebugCsv:
         )
         sync_config = PocketSmithSyncConfig(
             client=mocker.Mock(spec=PocketSmithClient),
-            transaction_account_id=42,
-            source_iban="NO11111111111",
+            mappings={"NO11111111111": 42},
         )
 
         _export_transactions_to_csv(

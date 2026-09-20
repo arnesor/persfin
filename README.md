@@ -78,9 +78,10 @@ This produces `localhost+2.pem` (certificate) and `localhost+2-key.pem` (private
 
 ## Quick start – interactive CLI
 
-The easiest way to use persfin is the interactive CLI.
-It lists all Norwegian banks, lets you pick one, opens the bank login in your
-browser, and then prints your balances and recent transactions and stores to csv file.
+The easiest way to use persfin is the interactive CLI. On first use it lets you
+select Norwegian banks and accounts, opens each bank login in your browser, and
+stores those selections for later runs. It prints balances and recent
+transactions and writes the transactions to CSV files.
 
 ### Configure
 1. Copy `.env.example` in the root directory to `.env`.
@@ -95,17 +96,17 @@ uv run persfin-cli
 
 ### PocketSmith synchronization
 
-The CLI can optionally send booked transactions for bank account
-`NO11111111111` directly to a PocketSmith transaction account. Pending
-transactions are not uploaded, and ordinary CLI runs remain CSV-only.
+The CLI can optionally send booked transactions from selected bank accounts to
+PocketSmith transaction accounts. Pending transactions are not uploaded, and
+ordinary CLI runs remain CSV-only.
 
 1. Create a developer key in PocketSmith under **Settings > Security**.
-2. Set the developer key and source IBAN shown in `.env.example`.
-   The CLI automatically selects a PocketSmith transaction account whose
-   account number matches the source IBAN. When PocketSmith has no account
-   number, the account name is also matched. If there is no unique match, the
-   CLI lists the available account names, numbers, and IDs and asks you to
-   select one.
+2. Set the developer key shown in `.env.example`. On the first PocketSmith run,
+   the CLI asks for a destination for each selected account with an IBAN. You
+   can select a PocketSmith account or persistently skip that source account.
+   These decisions are stored by source IBAN and PocketSmith account ID. Each
+   PocketSmith destination can be mapped from only one source IBAN so duplicate
+   transaction detection remains unambiguous.
 3. Optionally choose a permanent cutover date after transactions previously
    imported from CSV; older transactions will never be uploaded by this
    integration. Without one, sync uses `--from-date` or the last 90 days.
@@ -120,8 +121,31 @@ configured, the later of that date and `POCKETSMITH_CUTOVER_DATE` is used.
 Uploaded transactions retain a stable Enable Banking identity in PocketSmith's
 memo field, so retries skip transactions already created, including after a
 partially failed run.
-`POCKETSMITH_TRANSACTION_ACCOUNT_ID` remains available as an optional override
-when automatic matching should not be used.
+
+### Stored CLI configuration
+
+Bank, account, and PocketSmith selections are stored in
+`~/.persfin/config_<APP_ID>.json`. Enable Banking authorization sessions remain
+separate in `~/.persfin/session_cache_<APP_ID>.json`.
+
+```bash
+uv run persfin-cli config list
+uv run persfin-cli config list enablebanking
+uv run persfin-cli config list pocketsmith
+uv run persfin-cli config list sessions
+
+uv run persfin-cli config clear enablebanking
+uv run persfin-cli config clear pocketsmith
+uv run persfin-cli config clear sessions
+uv run persfin-cli config clear all
+```
+
+Clearing `enablebanking` retains valid authentication sessions so selected banks
+can be configured again without an unnecessary login. Clearing `sessions`
+retains bank and account selections but forces each configured bank to be
+authenticated on the next run. Clearing `all` removes both selections and
+sessions. Configuration and cache files use owner-only permissions on POSIX
+systems.
 
 ### Debug transaction exports
 
