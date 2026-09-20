@@ -102,8 +102,10 @@ transactions are not uploaded, and ordinary CLI runs remain CSV-only.
 1. Create a developer key in PocketSmith under **Settings > Security**.
 2. Set the developer key and source IBAN shown in `.env.example`.
    The CLI automatically selects a PocketSmith transaction account whose
-   account number matches the source IBAN. If there is no unique match, it lists
-   the available account names, numbers, and IDs and asks you to select one.
+   account number matches the source IBAN. When PocketSmith has no account
+   number, the account name is also matched. If there is no unique match, the
+   CLI lists the available account names, numbers, and IDs and asks you to
+   select one.
 3. Optionally choose a permanent cutover date after transactions previously
    imported from CSV; older transactions will never be uploaded by this
    integration. Without one, sync uses `--from-date` or the last 90 days.

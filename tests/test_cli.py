@@ -371,6 +371,22 @@ class TestPocketSmithDestinationSelection:
 
         assert _select_pocketsmith_account(accounts, "NO11111111111") == 42
 
+    def test_matches_iban_account_name_when_number_is_not_set(self) -> None:
+        accounts = [
+            self._account(1, "Savings", None),
+            self._account(2, "NO11111111111", None),
+        ]
+
+        assert _select_pocketsmith_account(accounts, "NO11111111111") == 2
+
+    def test_prefers_account_number_over_matching_name(self) -> None:
+        accounts = [
+            self._account(1, "NO11111111111", None),
+            self._account(2, "Daily", "NO11111111111"),
+        ]
+
+        assert _select_pocketsmith_account(accounts, "NO11111111111") == 2
+
     def test_prompts_when_no_account_matches(
         self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
     ) -> None:

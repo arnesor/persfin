@@ -279,17 +279,24 @@ def _select_pocketsmith_account(
 ) -> int:
     """Automatically match an IBAN or prompt for a PocketSmith account."""
     normalized_iban = _normalize_account_number(source_iban)
-    matches = [
+    number_matches = [
         account
         for account in accounts
         if account.number is not None
         and _normalize_account_number(account.number) == normalized_iban
     ]
+    matches = number_matches or [
+        account
+        for account in accounts
+        if account.number is None
+        and account.name is not None
+        and _normalize_account_number(account.name) == normalized_iban
+    ]
     if len(matches) == 1:
         account = matches[0]
         print(
             f"Matched PocketSmith account: {account.name or 'Unnamed account'} "
-            f"({account.number}, id: {account.id})"
+            f"(number: {account.number or 'not set'}, id: {account.id})"
         )
         return account.id
 
