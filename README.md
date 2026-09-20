@@ -88,6 +88,30 @@ transactions and writes the transactions to CSV files.
 2. Open the `.env` file, and set the Enable Banking application ID 
    and `.pem`-file to the one you downloaded from Enable Banking. 
 
+### WSL config
+
+If you are using the program in linux in WSL2 on Windows, you need to make it
+to open authentication in your normal Windows browser. Do that this way:
+
+Install `wslview` inside WSL:
+
+```bash
+sudo apt update
+sudo apt install wslu
+```
+
+To make this permanent, add this to `~/.bashrc`:
+
+```bash
+export BROWSER=wslview
+```
+
+Then reload it:
+
+```bash
+source ~/.bashrc
+```
+
 ### Run
 
 ```bash
