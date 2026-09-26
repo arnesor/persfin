@@ -78,20 +78,116 @@ This produces `localhost+2.pem` (certificate) and `localhost+2-key.pem` (private
 
 ## Quick start – interactive CLI
 
-The easiest way to use persfin is the interactive CLI.
-It lists all Norwegian banks, lets you pick one, opens the bank login in your
-browser, and then prints your balances and recent transactions and stores to csv file.
+The easiest way to use persfin is the interactive CLI. On first use it lets you
+select Norwegian banks and accounts, opens each bank login in your browser, and
+stores those selections for later runs. It prints balances and recent
+transactions and writes the transactions to CSV files.
 
 ### Configure
 1. Copy `.env.example` in the root directory to `.env`.
 2. Open the `.env` file, and set the Enable Banking application ID 
    and `.pem`-file to the one you downloaded from Enable Banking. 
 
+### WSL config
+
+If you are using the program in linux in WSL2 on Windows, you need to make it
+to open authentication in your normal Windows browser. Do that this way:
+
+Install `wslview` inside WSL:
+
+```bash
+sudo apt update
+sudo apt install wslu
+```
+
+To make this permanent, add this to `~/.bashrc`:
+
+```bash
+export BROWSER=wslview
+```
+
+Then reload it:
+
+```bash
+source ~/.bashrc
+```
+
 ### Run
 
 ```bash
 uv run persfin-cli
 ```
+
+### PocketSmith synchronization
+
+The CLI can optionally send booked transactions from selected bank accounts to
+PocketSmith transaction accounts. Pending transactions are not uploaded, and
+ordinary CLI runs remain CSV-only.
+
+1. Create a developer key in PocketSmith under **Settings > Security**.
+2. Set the developer key shown in `.env.example`. On the first PocketSmith run,
+   the CLI asks for a destination for each selected account with an IBAN. You
+   can select a PocketSmith account or persistently skip that source account.
+   These decisions are stored by source IBAN and PocketSmith account ID. Each
+   PocketSmith destination can be mapped from only one source IBAN so duplicate
+   transaction detection remains unambiguous.
+3. Optionally choose a permanent cutover date after transactions previously
+   imported from CSV; older transactions will never be uploaded by this
+   integration. Without one, sync uses `--from-date` or the last 90 days.
+4. Run:
+
+```bash
+uv run persfin-cli --pocketsmith
+```
+
+You can restrict a run further with `--from-date YYYY-MM-DD`. When a cutover is
+configured, the later of that date and `POCKETSMITH_CUTOVER_DATE` is used.
+Uploaded transactions retain a stable Enable Banking identity in PocketSmith's
+memo field, so retries skip transactions already created, including after a
+partially failed run.
+
+### Stored CLI configuration
+
+Bank, account, and PocketSmith selections are stored in
+`~/.persfin/config_<APP_ID>.json`. Enable Banking authorization sessions remain
+separate in `~/.persfin/session_cache_<APP_ID>.json`.
+
+```bash
+uv run persfin-cli config list
+uv run persfin-cli config list enablebanking
+uv run persfin-cli config list pocketsmith
+uv run persfin-cli config list sessions
+
+uv run persfin-cli config clear enablebanking
+uv run persfin-cli config clear pocketsmith
+uv run persfin-cli config clear sessions
+uv run persfin-cli config clear all
+```
+
+Clearing `enablebanking` retains valid authentication sessions so selected banks
+can be configured again without an unnecessary login. Clearing `sessions`
+retains bank and account selections but forces each configured bank to be
+authenticated on the next run. Clearing `all` removes both selections and
+sessions. Configuration and cache files use owner-only permissions on POSIX
+systems.
+
+### Debug transaction exports
+
+Use `--debug` to write complete API transaction records in addition to the
+normal reduced CSV exports:
+
+```bash
+uv run persfin-cli --debug
+uv run persfin-cli --pocketsmith --debug
+```
+
+Enable Banking records are written once per source account as
+`data/<account>_debug.csv`. With PocketSmith synchronization enabled, every
+PocketSmith transaction read for duplicate detection is written to
+`data/pocketsmith_<transaction-account-id>_debug.csv`. Nested arrays and objects
+are stored as JSON within their CSV cells; scalar values are JSON-encoded too so
+empty, null, and missing values remain distinguishable. These files contain
+sensitive raw financial data and should not be shared.
 
 Sample session:
 
@@ -197,7 +293,8 @@ src/persfin/
 │   ├── config.py            # pydantic-settings (was persfin/config.py)
 │   └── session_store.py     # SessionStore + get_store + StoreDep (was in main.py)
 ├── services/
-│   └── enablebanking.py     # HTTP client (was persfin/enablebanking.py)
+│   ├── enablebanking.py     # Enable Banking HTTP client
+│   └── pocketsmith.py       # PocketSmith HTTP client and synchronization
 └── api/
     ├── banks.py             # GET /banks
     ├── auth.py              # POST /connect, GET /callback

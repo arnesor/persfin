@@ -1,8 +1,10 @@
 """Application settings loaded from environment / .env file."""
 
 import functools
+from datetime import date
 from pathlib import Path
 
+from pydantic import SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -21,6 +23,11 @@ class Settings(BaseSettings):
     # Norwegian bank defaults (override via .env)
     aspsp_name: str = "Sbanken"
     aspsp_country: str = "NO"
+
+    # PocketSmith is optional and only required by ``persfin-cli --pocketsmith``.
+    pocketsmith_developer_key: SecretStr | None = None
+    pocketsmith_cutover_date: date | None = None
+    pocketsmith_api_origin: str = "https://api.pocketsmith.com/v2"
 
 
 @functools.cache

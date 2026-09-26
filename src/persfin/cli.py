@@ -8,37 +8,68 @@ Flow (first run):
     2. Prompts the user to pick one or more banks.
     3. For each bank: opens the OAuth login URL in the browser and waits for
        the /callback redirect via a local FastAPI server.
-    4. Saves all sessions to ~/.persfin/session_cache_<app_id>.json.
-    5. Prints account balances and exports transactions to CSV.
+    4. Prompts for accounts and stores selections in
+       ~/.persfin/config_<app_id>.json.
+    5. Saves sessions to ~/.persfin/session_cache_<app_id>.json.
+    6. Prints account balances and exports transactions to CSV.
 
 Subsequent runs:
-    - Loads valid cached sessions and skips authentication entirely.
-    - Re-authenticates only sessions that have expired.
+    - Loads sessions for configured banks and skips valid authentication.
+    - Re-authenticates only configured banks with missing or expired sessions.
+    - Processes only configured accounts.
 """
 
 import asyncio
+import csv
 import json
+import os
 import sys
+import tempfile
 import threading
 import time
 import webbrowser
+from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
+from enum import StrEnum
 from pathlib import Path
-from typing import NamedTuple
+from typing import Annotated, NamedTuple
 
 import httpx
 import polars as pl
 import typer
 import uvicorn
 
+from persfin.core.cli_config import (
+    CliConfig,
+    PocketSmithMapping,
+    SelectedAccount,
+    SelectedBank,
+    load_cli_config,
+    normalize_account_number,
+    save_cli_config,
+)
 from persfin.core.session_store import get_store
 from persfin.main import app
-from persfin.schemas.schemas import BankSession, SessionResponse
+from persfin.schemas.schemas import (
+    AccountRef,
+    BankSession,
+    SessionResponse,
+    Transaction,
+)
 from persfin.services.enablebanking import (
     get_aspsps,
     get_balances,
     get_transactions,
     start_auth,
+)
+from persfin.services.pocketsmith import (
+    PocketSmithClient,
+    PocketSmithSyncResult,
+    PocketSmithTransaction,
+    PocketSmithTransactionAccount,
+    sync_transactions,
+    transaction_description,
 )
 
 # ── Constants ─────────────────────────────────────────────────────────────────
@@ -63,8 +94,17 @@ def _make_cache_file() -> Path:
     return _CACHE_DIR / f"session_cache_{app_id}.json"
 
 
+def _make_config_file() -> Path:
+    """Return the persistent CLI configuration path for the current APP_ID."""
+    from persfin.core.config import get_settings
+
+    app_id = get_settings().app_id
+    return _CACHE_DIR / f"config_{app_id}.json"
+
+
 # Resolved once at import time so tests can override it with monkeypatch.setattr.
 _CACHE_FILE: Path = _make_cache_file()
+_CONFIG_FILE: Path = _make_config_file()
 
 
 def _cache_key(aspsp_name: str, aspsp_country: str) -> str:
@@ -78,6 +118,15 @@ class BankToAuth(NamedTuple):
     aspsp_name: str
     aspsp_country: str
     maximum_consent_validity: int | None  # seconds, or None to use the default
+
+
+@dataclass(frozen=True)
+class PocketSmithSyncConfig:
+    """PocketSmith dependencies and account mappings for one CLI run."""
+
+    client: PocketSmithClient
+    mappings: dict[str, int]
+    cutover_date: date | None = None
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -136,6 +185,100 @@ def _prompt_bank_multi_selection(
                 print(f"    - {b.aspsp_name} ({b.aspsp_country})")
             return selected
         print(f"  Please enter numbers between 1 and {len(banks)}.")
+
+
+def _prompt_account_multi_selection(
+    bank_name: str, accounts: list[AccountRef]
+) -> list[SelectedAccount]:
+    """Prompt for the accounts to process for one selected bank."""
+    if not accounts:
+        raise ValueError(f"No accounts were returned for {bank_name}.")
+    print(f"\nSelect accounts for {bank_name}:\n")
+    for index, account in enumerate(accounts, start=1):
+        details = [account.display_name]
+        if account.name and account.name != account.display_name:
+            details.append(account.name)
+        if account.currency:
+            details.append(account.currency)
+        print(f"  {index:>3}. {' | '.join(details)}")
+    print("\nEnter account numbers separated by spaces or commas.")
+    while True:
+        raw = input("\nSelect accounts: ").strip()
+        parts = raw.replace(",", " ").split()
+        try:
+            indices = [int(part) for part in parts]
+        except ValueError:
+            indices = []
+        if indices and all(1 <= index <= len(accounts) for index in indices):
+            selected_indices = list(dict.fromkeys(indices))
+            return [
+                SelectedAccount.from_account(accounts[index - 1])
+                for index in selected_indices
+            ]
+        print(f"  Please enter one or more numbers between 1 and {len(accounts)}.")
+
+
+def _configured_sessions(
+    banks: list[SelectedBank], cache: dict[str, BankSession]
+) -> list[SessionResponse]:
+    """Return cached sessions filtered to configured accounts."""
+    sessions: list[SessionResponse] = []
+    for bank in banks:
+        key = _cache_key(bank.aspsp_name, bank.aspsp_country)
+        bank_session = cache.get(key)
+        if bank_session is None:
+            continue
+        selected: list[AccountRef] = []
+        for configured_account in bank.accounts:
+            account = _match_configured_account(
+                configured_account, bank_session.accounts
+            )
+            if account is None:
+                print(
+                    f"Warning: configured account {configured_account.iban or configured_account.name or configured_account.key} "
+                    f"was not returned by {bank.aspsp_name}; skipping it."
+                )
+                continue
+            selected.append(account)
+        sessions.append(
+            SessionResponse(session_id=bank_session.session_id, accounts=selected)
+        )
+    return sessions
+
+
+def _match_configured_account(
+    configured: SelectedAccount, available: list[AccountRef]
+) -> AccountRef | None:
+    """Match a saved account using every identity in decreasing stability."""
+    candidate_groups: list[list[AccountRef]] = []
+    if configured.iban:
+        candidate_groups.append(
+            [
+                account
+                for account in available
+                if account.account_id is not None
+                and account.account_id.iban is not None
+                and _normalize_account_number(account.account_id.iban)
+                == configured.iban
+            ]
+        )
+    if configured.identification_hash:
+        candidate_groups.append(
+            [
+                account
+                for account in available
+                if account.identification_hash == configured.identification_hash
+            ]
+        )
+    candidate_groups.append(
+        [account for account in available if account.uid == configured.uid]
+    )
+    for candidates in candidate_groups:
+        if len(candidates) == 1:
+            return candidates[0]
+        if len(candidates) > 1:
+            return None
+    return None
 
 
 def _start_server_thread() -> None:
@@ -216,10 +359,220 @@ def _validate_from_date(value: str | None) -> date | None:
     return parsed_date
 
 
+def _pocketsmith_start_date(
+    from_date: date | None, cutover_date: date | None, default_start_date: date
+) -> date:
+    """Return the latest configured start date, falling back to the CLI default."""
+    candidates = [
+        candidate for candidate in (from_date, cutover_date) if candidate is not None
+    ]
+    return max(candidates) if candidates else default_start_date
+
+
+def _prompt_pocketsmith_mapping(
+    accounts: list[PocketSmithTransactionAccount], source_iban: str
+) -> PocketSmithMapping:
+    """Prompt for and return one durable PocketSmith mapping decision."""
+    print(f"\nSelect the PocketSmith destination for {source_iban}:\n")
+    print("    0. Do not synchronize this account")
+    for index, account in enumerate(accounts, start=1):
+        print(
+            f"  {index:>3}. {account.name or 'Unnamed account'} "
+            f"(number: {account.number or 'not set'}, id: {account.id})"
+        )
+    while True:
+        raw = input("\nPocketSmith destination: ").strip()
+        try:
+            selected = int(raw)
+        except ValueError:
+            print("  Please enter a number from the list.")
+            continue
+        if selected == 0:
+            return PocketSmithMapping(status="skipped")
+        if 1 <= selected <= len(accounts):
+            account = accounts[selected - 1]
+            return PocketSmithMapping(
+                status="mapped",
+                transaction_account_id=account.id,
+                transaction_account_name=account.name or "Unnamed account",
+            )
+        print(f"  Please enter a number between 0 and {len(accounts)}.")
+
+
+def _resolve_pocketsmith_mappings(
+    config: CliConfig,
+    sessions: list[SessionResponse],
+    client: PocketSmithClient,
+) -> dict[str, int]:
+    """Resolve and persist destination decisions for selected IBAN accounts."""
+    accounts_without_iban = [
+        account
+        for session in sessions
+        for account in session.accounts
+        if account.account_id is None or not account.account_id.iban
+    ]
+    for account in accounts_without_iban:
+        print(
+            f"PocketSmith: {account.name or account.uid} has no IBAN and cannot "
+            "be mapped; CSV export remains enabled."
+        )
+    source_ibans = {
+        _normalize_account_number(account.account_id.iban)
+        for session in sessions
+        for account in session.accounts
+        if account.account_id is not None and account.account_id.iban
+    }
+    pocket_accounts: list[PocketSmithTransactionAccount] | None = None
+    for source_iban in sorted(source_ibans):
+        if source_iban in config.pocketsmith.mappings:
+            continue
+        if pocket_accounts is None:
+            pocket_accounts = client.list_transaction_accounts()
+        while True:
+            mapping = _prompt_pocketsmith_mapping(pocket_accounts, source_iban)
+            destination_id = mapping.transaction_account_id
+            reused_by = next(
+                (
+                    existing_iban
+                    for existing_iban, existing in config.pocketsmith.mappings.items()
+                    if destination_id is not None
+                    and existing.transaction_account_id == destination_id
+                ),
+                None,
+            )
+            if reused_by is None:
+                break
+            print(
+                f"  PocketSmith destination {destination_id} is already mapped "
+                f"from {reused_by}. Select a different destination."
+            )
+        config.pocketsmith.mappings[source_iban] = mapping
+        save_cli_config(config, _CONFIG_FILE)
+
+    resolved = {
+        source_iban: mapping.transaction_account_id
+        for source_iban, mapping in config.pocketsmith.mappings.items()
+        if source_iban in source_ibans
+        and mapping.status == "mapped"
+        and mapping.transaction_account_id is not None
+    }
+    destination_sources: dict[int, list[str]] = {}
+    for source_iban, destination_id in resolved.items():
+        destination_sources.setdefault(destination_id, []).append(source_iban)
+    duplicate_destinations = {
+        destination_id: sources
+        for destination_id, sources in destination_sources.items()
+        if len(sources) > 1
+    }
+    if duplicate_destinations:
+        details = "; ".join(
+            f"{destination_id}: {', '.join(sources)}"
+            for destination_id, sources in duplicate_destinations.items()
+        )
+        raise ValueError(
+            "Each PocketSmith destination can receive transactions from only one "
+            f"source IBAN ({details}). Run `persfin-cli config clear pocketsmith` "
+            "to select distinct destinations."
+        )
+    for destination_id in sorted(set(resolved.values())):
+        try:
+            client.get_transaction_account(destination_id)
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 404:
+                source_list = ", ".join(
+                    source
+                    for source, mapped_id in resolved.items()
+                    if mapped_id == destination_id
+                )
+                raise ValueError(
+                    f"PocketSmith destination {destination_id} for {source_list} no "
+                    "longer exists. Run `persfin-cli config clear pocketsmith` to "
+                    "select destinations again."
+                ) from exc
+            raise
+    return resolved
+
+
+def _normalize_account_number(value: str) -> str:
+    return normalize_account_number(value)
+
+
+def _fetch_all_transactions(
+    account_uid: str,
+    date_from: str,
+    on_page: Callable[[list[Transaction]], None] | None = None,
+) -> list[Transaction]:
+    """Fetch every Enable Banking transaction page for an account."""
+    transactions: list[Transaction] = []
+    continuation_key: str | None = None
+    while True:
+        response = get_transactions(
+            account_uid=account_uid,
+            date_from=date_from,
+            continuation_key=continuation_key,
+        )
+        transactions.extend(response.transactions)
+        if on_page is not None:
+            on_page(transactions)
+        continuation_key = response.continuation_key
+        if not continuation_key:
+            return transactions
+
+
+def _write_debug_csv(records: list[dict[str, object]], path: Path) -> None:
+    """Atomically write complete API records with JSON-encoded values."""
+    temporary_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            newline="",
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            dir=path.parent,
+            delete=False,
+        ) as csv_file:
+            temporary_path = Path(csv_file.name)
+            if records:
+                fieldnames = list(
+                    dict.fromkeys(field for record in records for field in record)
+                )
+                writer = csv.DictWriter(csv_file, fieldnames=fieldnames)
+                writer.writeheader()
+                writer.writerows(
+                    {
+                        field: _debug_csv_value(
+                            record[field] if field in record else _MISSING_DEBUG_VALUE
+                        )
+                        for field in fieldnames
+                    }
+                    for record in records
+                )
+        assert temporary_path is not None
+        if sys.platform != "win32":
+            temporary_path.chmod(0o600)
+        temporary_path.replace(path)
+    except Exception:
+        if temporary_path is not None:
+            temporary_path.unlink(missing_ok=True)
+        raise
+
+
+def _debug_csv_value(value: object) -> object:
+    if value is _MISSING_DEBUG_VALUE:
+        return ""
+    return json.dumps(value, ensure_ascii=False, sort_keys=True)
+
+
+_MISSING_DEBUG_VALUE = object()
+
+
 def _export_transactions_to_csv(
     sessions: list[SessionResponse],
     from_date: date | None = None,
     output_dir: Path | None = None,
+    pocketsmith: PocketSmithSyncConfig | None = None,
+    debug: bool = False,
 ) -> None:
     """Fetch transactions for every account, print a preview, and write one CSV per account.
 
@@ -241,10 +594,12 @@ def _export_transactions_to_csv(
     else:
         output_dir.mkdir(parents=True, exist_ok=True)
 
-    if from_date is None:
-        date_from = (datetime.now(UTC) - timedelta(days=90)).date().isoformat()
-    else:
-        date_from = from_date.isoformat()
+    default_start_date = from_date or (datetime.now(UTC) - timedelta(days=90)).date()
+    sync_start_date = (
+        _pocketsmith_start_date(from_date, pocketsmith.cutover_date, default_start_date)
+        if pocketsmith is not None
+        else None
+    )
 
     for session in sessions:
         print(f"\n{'=' * 60}")
@@ -255,6 +610,24 @@ def _export_transactions_to_csv(
         session_expired = False
         for account in session.accounts:
             uid = account.uid
+            iban = (
+                _normalize_account_number(account.account_id.iban)
+                if account.account_id is not None and account.account_id.iban
+                else None
+            )
+            destination_id = (
+                pocketsmith.mappings.get(iban)
+                if pocketsmith is not None and iban is not None
+                else None
+            )
+            safe_name = account.display_name.replace("/", "_").replace("\\", "_")
+            account_start_date = (
+                sync_start_date
+                if destination_id is not None
+                else default_start_date
+            )
+            assert account_start_date is not None
+            date_from = account_start_date.isoformat()
             print(f"\n-- Account: {account.display_name} (uid: {uid}) --")
 
             # Balances
@@ -280,48 +653,65 @@ def _export_transactions_to_csv(
                     print(f"   (Could not fetch balances: {exc})")
 
             # Fetch all transactions (single call, paged)
-            rows: list[dict] = []
-            continuation_key: str | None = None
+            transactions: list[Transaction] = []
             fetch_error: str | None = None
-
-            while True:
+            enable_banking_debug_path = output_dir / f"{safe_name}_debug.csv"
+            debug_snapshot_written = False
+            debug_record_count = 0
+            if debug:
                 try:
-                    resp = get_transactions(
-                        account_uid=uid,
-                        date_from=date_from,
-                        continuation_key=continuation_key,
+                    enable_banking_debug_path.unlink(missing_ok=True)
+                except OSError as exc:
+                    print(f"   (Could not clear Enable Banking debug CSV: {exc})")
+
+            def write_enable_banking_debug(
+                records: list[Transaction],
+                debug_path: Path = enable_banking_debug_path,
+            ) -> None:
+                nonlocal debug_snapshot_written, debug_record_count
+                try:
+                    _write_debug_csv(
+                        [
+                            transaction.model_dump(mode="json", exclude_unset=True)
+                            for transaction in records
+                        ],
+                        debug_path,
                     )
                 except Exception as exc:
-                    fetch_error = str(exc)
-                    if (
-                        isinstance(exc, httpx.HTTPStatusError)
-                        and exc.response.status_code == 401
-                    ):
-                        fetch_error += (
-                            " - session has expired/been revoked on the server"
-                        )
-                        _invalidate_session(session.session_id)
-                        session_expired = True
-                    break
+                    print(f"   (Could not write Enable Banking debug CSV: {exc})")
+                    return
+                debug_snapshot_written = True
+                debug_record_count = len(records)
 
-                rows.extend(
-                    {
-                        "booking_date": t.booking_date,
-                        "amount": t.transaction_amount.amount,
-                        "currency": t.transaction_amount.currency,
-                        "credit_debit_indicator": t.credit_debit_indicator,
-                        "status": t.status,
-                        "remittance_information": (
-                            "|".join(t.remittance_information)
-                            if t.remittance_information
-                            else None
-                        ),
-                    }
-                    for t in resp.transactions
+            try:
+                transactions = _fetch_all_transactions(
+                    uid,
+                    date_from,
+                    on_page=write_enable_banking_debug if debug else None,
                 )
-                continuation_key = resp.continuation_key
-                if not continuation_key:
-                    break
+            except Exception as exc:
+                fetch_error = str(exc)
+                if (
+                    isinstance(exc, httpx.HTTPStatusError)
+                    and exc.response.status_code == 401
+                ):
+                    fetch_error += " - session has expired/been revoked on the server"
+                    _invalidate_session(session.session_id)
+                    session_expired = True
+
+            rows = [
+                {
+                    "booking_date": transaction.booking_date,
+                    "amount": transaction.transaction_amount.amount,
+                    "currency": transaction.transaction_amount.currency,
+                    "credit_debit_indicator": transaction.credit_debit_indicator,
+                    "status": transaction.status,
+                    "remittance_information": (
+                        transaction_description(transaction)
+                    ),
+                }
+                for transaction in transactions
+            ]
 
             # Print transaction preview (up to 20 rows)
             print(f"\n   Transactions since {date_from} ({len(rows)} total):")
@@ -342,6 +732,12 @@ def _export_transactions_to_csv(
             else:
                 print("   (no transactions found in this period)")
 
+            if debug_snapshot_written:
+                print(
+                    f"   -> Wrote {debug_record_count} full Enable Banking "
+                    f"record(s) to {enable_banking_debug_path}"
+                )
+
             if session_expired:
                 break
 
@@ -350,30 +746,115 @@ def _export_transactions_to_csv(
                 print(
                     f"  (No transactions fetched for {account.display_name} - skipping CSV)"
                 )
+                if (
+                    pocketsmith is not None and destination_id is not None
+                ):
+                    if fetch_error is None:
+                        _print_pocketsmith_result(PocketSmithSyncResult())
+                    else:
+                        print("   -> PocketSmith: synchronization skipped")
                 continue
 
             df = pl.DataFrame(rows, infer_schema_length=len(rows))
 
             amount = pl.col("amount").cast(pl.Decimal(scale=2), strict=True)
 
-            df = (
-                 df.filter(pl.col("status") != "PDNG")
-                 .with_columns(
-                    pl.when(pl.col("credit_debit_indicator") == "CRDT")
-                    .then(amount)
-                    .when(pl.col("credit_debit_indicator") == "DBIT")
-                    .then(-amount)
-                    .otherwise(None)
-                    .alias("amount")
-                )
+            df = df.filter(pl.col("status") != "PDNG").with_columns(
+                pl.when(pl.col("credit_debit_indicator") == "CRDT")
+                .then(amount)
+                .when(pl.col("credit_debit_indicator") == "DBIT")
+                .then(-amount)
+                .otherwise(None)
+                .alias("amount")
             )
 
-            safe_name = account.display_name.replace("/", "_").replace("\\", "_")
             csv_path = output_dir / f"{safe_name}.csv"
             df.write_csv(csv_path)
-            print(f"   -> Wrote {len(rows)} row(s) to {csv_path}")
+            print(f"   -> Wrote {df.height} row(s) to {csv_path}")
+
+            if (
+                pocketsmith is not None and destination_id is not None
+            ):
+                assert sync_start_date is not None
+                pocketsmith_debug_path = (
+                    output_dir
+                    / f"pocketsmith_{destination_id}_debug.csv"
+                )
+                pocketsmith_debug_count = 0
+                pocketsmith_debug_written = False
+                if debug:
+                    try:
+                        pocketsmith_debug_path.unlink(missing_ok=True)
+                    except OSError as exc:
+                        print(f"   (Could not clear PocketSmith debug CSV: {exc})")
+
+                def write_pocketsmith_debug(
+                    records: list[PocketSmithTransaction],
+                    debug_path: Path = pocketsmith_debug_path,
+                ) -> None:
+                    nonlocal pocketsmith_debug_count, pocketsmith_debug_written
+                    try:
+                        _write_debug_csv(
+                            [
+                                transaction.model_dump(mode="json", exclude_unset=True)
+                                for transaction in records
+                            ],
+                            debug_path,
+                        )
+                    except Exception as exc:
+                        print(f"   (Could not write PocketSmith debug CSV: {exc})")
+                        return
+                    pocketsmith_debug_count = len(records)
+                    pocketsmith_debug_written = True
+
+                try:
+                    result = sync_transactions(
+                        client=pocketsmith.client,
+                        account_id=destination_id,
+                        account_uid=account.uid,
+                        transactions=transactions,
+                        start_date=sync_start_date,
+                        existing_transactions_callback=(
+                            write_pocketsmith_debug if debug else None
+                        ),
+                    )
+                except httpx.HTTPStatusError as exc:
+                    if exc.response.status_code == 404:
+                        raise ValueError(
+                            f"PocketSmith destination {destination_id} for {iban} "
+                            "no longer exists. Run `persfin-cli config clear "
+                            "pocketsmith` to select destinations again."
+                        ) from exc
+                    raise
+                _print_pocketsmith_result(result)
+                if pocketsmith_debug_written:
+                    print(
+                        f"   -> Wrote {pocketsmith_debug_count} full "
+                        f"PocketSmith record(s) to {pocketsmith_debug_path}"
+                    )
 
     print(f"\n{'=' * 60}\n")
+
+
+def _print_pocketsmith_result(result: PocketSmithSyncResult) -> None:
+    first_created_date = (
+        result.first_created_date.isoformat()
+        if result.first_created_date is not None
+        else "n/a"
+    )
+    last_created_date = (
+        result.last_created_date.isoformat()
+        if result.last_created_date is not None
+        else "n/a"
+    )
+    print(
+        "   -> PocketSmith: "
+        f"{result.created} stored "
+        f"(first date: {first_created_date}, last date: {last_created_date}), "
+        f"{result.duplicates} duplicate(s), "
+        f"{result.pending} pending, "
+        f"{result.invalid} invalid"
+    )
 
 
 # ── Session cache ─────────────────────────────────────────────────────────────
@@ -391,8 +872,8 @@ def _load_session_cache() -> dict[str, BankSession]:
     try:
         raw: dict = json.loads(cache_file.read_text(encoding="utf-8"))
         return {k: BankSession.model_validate(v) for k, v in raw.items()}
-    except Exception as exc:
-        print(f"Could not read session cache ({exc}) — starting fresh.")
+    except Exception:
+        print("Could not read session cache; starting fresh.")
         return {}
 
 
@@ -405,66 +886,89 @@ def _save_session_cache(sessions: dict[str, BankSession]) -> None:
     """
     cache_file = _CACHE_FILE
     _CACHE_DIR.mkdir(parents=True, exist_ok=True)
-    data = {k: v.model_dump(mode="json") for k, v in sessions.items()}
-    cache_file.write_text(
-        json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8"
-    )
     if sys.platform != "win32":
         _CACHE_DIR.chmod(0o700)  # rwx------  (owner only)
-        cache_file.chmod(0o600)  # rw-------  (owner only)
+    data = {k: v.model_dump(mode="json") for k, v in sessions.items()}
+    temporary_path: Path | None = None
+    try:
+        descriptor, temporary_name = tempfile.mkstemp(
+            dir=_CACHE_DIR, prefix=f".{cache_file.name}.", suffix=".tmp"
+        )
+        temporary_path = Path(temporary_name)
+        with os.fdopen(descriptor, "w", encoding="utf-8") as temporary_file:
+            json.dump(data, temporary_file, indent=2, ensure_ascii=False)
+            temporary_file.write("\n")
+        if sys.platform != "win32":
+            temporary_path.chmod(0o600)
+        temporary_path.replace(cache_file)
+    except Exception:
+        if temporary_path is not None:
+            temporary_path.unlink(missing_ok=True)
+        raise
     print(f"Session cache updated -> {cache_file}")
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────
 
 
-cli_app = typer.Typer(add_completion=False)
+class ConfigSection(StrEnum):
+    """Sections accepted by CLI configuration commands."""
+
+    ALL = "all"
+    ENABLE_BANKING = "enablebanking"
+    POCKETSMITH = "pocketsmith"
+    SESSIONS = "sessions"
 
 
-@cli_app.command()
+cli_app = typer.Typer(add_completion=False, invoke_without_command=True)
+config_app = typer.Typer(help="List or clear persistent CLI configuration.")
+cli_app.add_typer(config_app, name="config")
+
+
 def run_cli(
-    from_date: str = typer.Option(
-        None,
-        "--from-date",
-        "-fd",
-        help="Only retrieve transactions from this date (YYYY-MM-DD) and later. Must be in the past or today.",
-    ),
+    from_date: str | None = None,
+    pocketsmith: bool = False,
+    debug: bool = False,
 ) -> None:
     """Run the CLI."""
     parsed_date = _validate_from_date(from_date)
     store = get_store()
+    try:
+        config = load_cli_config(_CONFIG_FILE)
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc), param_hint="config") from exc
 
-    # 1. Load all cached bank sessions (both valid and expired)
     all_cached = _load_session_cache()
-    valid = {k: v for k, v in all_cached.items() if v.is_valid()}
-    expired = {k: v for k, v in all_cached.items() if not v.is_valid()}
-
-    # 2. Inject valid sessions into the in-memory store
-    for bs in valid.values():
-        store.put(bs.to_session_response())
-
-    # 3. Determine which banks need (re-)authentication
-    if not all_cached:
-        # First run — ask the user which banks to connect to
-        print("\nNo cached sessions found. Let's connect your bank(s).")
-        banks_to_auth = _prompt_bank_multi_selection(country="NO")
-    elif expired:
-        # Some sessions have expired — re-authenticate only those
-        print(
-            f"\n{len(expired)} cached session(s) have expired and need re-authentication:"
-        )
-        for bs in expired.values():
-            print(f"  - {bs.aspsp_name} ({bs.aspsp_country})")
-        banks_to_auth = [
-            BankToAuth(bs.aspsp_name, bs.aspsp_country, None) for bs in expired.values()
+    setup_banks: list[BankToAuth] | None = None
+    if config.enable_banking.banks:
+        desired_banks = [
+            BankToAuth(bank.aspsp_name, bank.aspsp_country, None)
+            for bank in config.enable_banking.banks
         ]
     else:
-        # All sessions are valid — nothing to do
-        count = len(valid)
-        print(f"\nAll {count} cached session(s) are valid — skipping authentication.")
-        banks_to_auth = []
+        print("\nNo Enable Banking selections found. Let's configure your bank(s).")
+        setup_banks = _prompt_bank_multi_selection(country="NO")
+        desired_banks = setup_banks
 
-    # 4. Authenticate each bank that needs it (one shared server, sequential logins)
+    banks_to_auth: list[BankToAuth] = []
+    for bank in desired_banks:
+        key = _cache_key(bank.aspsp_name, bank.aspsp_country)
+        cached = all_cached.get(key)
+        if cached is not None and cached.is_valid():
+            store.put(cached.to_session_response())
+        else:
+            banks_to_auth.append(bank)
+
+    if banks_to_auth:
+        print(f"\n{len(banks_to_auth)} bank session(s) need authentication:")
+        for bank in banks_to_auth:
+            print(f"  - {bank.aspsp_name} ({bank.aspsp_country})")
+    else:
+        print(
+            f"\nAll {len(desired_banks)} configured bank session(s) are valid "
+            "- skipping authentication."
+        )
+
     if banks_to_auth:
         _start_server_thread()
 
@@ -504,10 +1008,187 @@ def run_cli(
 
         _save_session_cache(all_cached)
 
-    # 5. Fetch, display, and export transactions
-    _export_transactions_to_csv(
-        store.all(), from_date=parsed_date, output_dir=_DATA_DIR
-    )
+    if setup_banks is not None:
+        config.enable_banking.banks = []
+        for bank in setup_banks:
+            key = _cache_key(bank.aspsp_name, bank.aspsp_country)
+            session = all_cached[key]
+            config.enable_banking.banks.append(
+                SelectedBank(
+                    aspsp_name=bank.aspsp_name,
+                    aspsp_country=bank.aspsp_country,
+                    accounts=_prompt_account_multi_selection(
+                        bank.aspsp_name, session.accounts
+                    ),
+                )
+            )
+        save_cli_config(config, _CONFIG_FILE)
+        print(f"CLI configuration updated -> {_CONFIG_FILE}")
+
+    sessions = _configured_sessions(config.enable_banking.banks, all_cached)
+    if not pocketsmith:
+        _export_transactions_to_csv(
+            sessions, from_date=parsed_date, output_dir=_DATA_DIR, debug=debug
+        )
+        return
+
+    from persfin.core.config import get_settings
+
+    settings = get_settings()
+    developer_key = settings.pocketsmith_developer_key
+    cutover_date = settings.pocketsmith_cutover_date
+    missing: list[str] = []
+    if developer_key is None:
+        missing.append("POCKETSMITH_DEVELOPER_KEY")
+    if missing:
+        raise typer.BadParameter(
+            f"Missing PocketSmith configuration: {', '.join(missing)}",
+            param_hint="--pocketsmith",
+        )
+    assert developer_key is not None
+    if cutover_date is not None and cutover_date > date.today():
+        raise typer.BadParameter(
+            "POCKETSMITH_CUTOVER_DATE must be today or earlier.",
+            param_hint="--pocketsmith",
+        )
+
+    with httpx.Client(
+        base_url=settings.pocketsmith_api_origin,
+        headers={"X-Developer-Key": developer_key.get_secret_value()},
+        timeout=30,
+    ) as http_client:
+        pocketsmith_client = PocketSmithClient(http_client)
+        mappings = _resolve_pocketsmith_mappings(
+            config, sessions, pocketsmith_client
+        )
+        sync_config = PocketSmithSyncConfig(
+            client=pocketsmith_client,
+            mappings=mappings,
+            cutover_date=cutover_date,
+        )
+        _export_transactions_to_csv(
+            sessions,
+            from_date=parsed_date,
+            output_dir=_DATA_DIR,
+            pocketsmith=sync_config,
+            debug=debug,
+        )
+
+
+@cli_app.callback(invoke_without_command=True)
+def cli(
+    ctx: typer.Context,
+    from_date: str | None = typer.Option(
+        None,
+        "--from-date",
+        "-fd",
+        help="Only retrieve transactions from this date (YYYY-MM-DD) and later.",
+    ),
+    pocketsmith: bool = typer.Option(
+        False,
+        "--pocketsmith",
+        help="Upload mapped booked transactions to PocketSmith.",
+    ),
+    debug: bool = typer.Option(
+        False,
+        "--debug",
+        help="Write full Enable Banking and PocketSmith transaction CSV files.",
+    ),
+) -> None:
+    """Run transaction export when no management subcommand is supplied."""
+    if ctx.invoked_subcommand is None:
+        run_cli(from_date=from_date, pocketsmith=pocketsmith, debug=debug)
+
+
+def _print_selected_config(config: CliConfig, section: ConfigSection) -> None:
+    """Print selected non-secret configuration sections."""
+    print(f"Configuration: {_CONFIG_FILE}")
+    if section in (ConfigSection.ALL, ConfigSection.ENABLE_BANKING):
+        print("\nEnable Banking:")
+        if not config.enable_banking.banks:
+            print("  (not configured)")
+        for bank in config.enable_banking.banks:
+            print(f"  {bank.aspsp_name} ({bank.aspsp_country})")
+            for account in bank.accounts:
+                label = account.iban or account.name or account.key
+                suffix = " ".join(
+                    value for value in (account.name, account.currency) if value
+                )
+                print(f"    {label}{f'  {suffix}' if suffix else ''}")
+    if section in (ConfigSection.ALL, ConfigSection.POCKETSMITH):
+        print("\nPocketSmith:")
+        if not config.pocketsmith.mappings:
+            print("  (not configured)")
+        for iban, mapping in sorted(config.pocketsmith.mappings.items()):
+            if mapping.status == "skipped":
+                print(f"  {iban} -> skipped")
+            else:
+                print(
+                    f"  {iban} -> {mapping.transaction_account_name} "
+                    f"(id: {mapping.transaction_account_id})"
+                )
+
+
+def _print_sessions() -> None:
+    """Print safe metadata for cached Enable Banking sessions."""
+    print(f"Session cache: {_CACHE_FILE}")
+    sessions = _load_session_cache()
+    if not sessions:
+        print("\nEnable Banking authentication sessions:\n  (none)")
+        return
+    print("\nEnable Banking authentication sessions:")
+    for session in sessions.values():
+        status = "valid until" if session.is_valid() else "expired"
+        print(
+            f"  {session.aspsp_name} ({session.aspsp_country}) "
+            f"{status} {session.valid_until.date()}"
+        )
+
+
+@config_app.command("list")
+def list_config(
+    section: Annotated[ConfigSection, typer.Argument()] = ConfigSection.ALL,
+) -> None:
+    """List selections, mappings, or safe authentication-session metadata."""
+    if section in (ConfigSection.ALL, ConfigSection.SESSIONS):
+        _print_sessions()
+    if section != ConfigSection.SESSIONS:
+        try:
+            config = load_cli_config(_CONFIG_FILE)
+        except ValueError as exc:
+            raise typer.BadParameter(str(exc), param_hint="section") from exc
+        _print_selected_config(config, section)
+
+
+@config_app.command("clear")
+def clear_config(section: Annotated[ConfigSection, typer.Argument()]) -> None:
+    """Clear a persistent configuration section or authentication sessions."""
+    if section == ConfigSection.ALL:
+        _CONFIG_FILE.unlink(missing_ok=True)
+        _CACHE_FILE.unlink(missing_ok=True)
+        print("Cleared all CLI configuration and authentication sessions.")
+        return
+    if section == ConfigSection.SESSIONS:
+        existed = _CACHE_FILE.exists()
+        _CACHE_FILE.unlink(missing_ok=True)
+        print(
+            "Cleared all Enable Banking authentication sessions."
+            if existed
+            else "No Enable Banking authentication sessions were stored."
+        )
+        return
+    try:
+        config = load_cli_config(_CONFIG_FILE)
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc), param_hint="section") from exc
+    if section == ConfigSection.ENABLE_BANKING:
+        config.enable_banking.banks.clear()
+        message = "Cleared Enable Banking bank and account selections."
+    else:
+        config.pocketsmith.mappings.clear()
+        message = "Cleared PocketSmith mappings."
+    save_cli_config(config, _CONFIG_FILE)
+    print(message)
 
 
 def main() -> None:

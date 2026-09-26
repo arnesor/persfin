@@ -3,7 +3,7 @@
 from datetime import UTC, datetime
 from typing import Any
 
-from pydantic import BaseModel, computed_field
+from pydantic import BaseModel, ConfigDict, computed_field
 
 # ── ASPSP ─────────────────────────────────────────────────────────────────────
 
@@ -144,6 +144,8 @@ class BankSession(BaseModel):
 class Amount(BaseModel):
     """A monetary amount with a currency code."""
 
+    model_config = ConfigDict(extra="allow")
+
     amount: str
     currency: str
 
@@ -171,13 +173,17 @@ class BalancesResponse(BaseModel):
 class Transaction(BaseModel):
     """A single bank transaction."""
 
+    model_config = ConfigDict(extra="allow")
+
     transaction_id: str | None = None
     entry_reference: str | None = None
     booking_date: str | None = None
     value_date: str | None = None
     transaction_amount: Amount
     creditor_name: str | None = None
+    creditor_account: AccountIdentification | None = None
     debtor_name: str | None = None
+    debtor_account: AccountIdentification | None = None
     remittance_information: list[str] | None = None
     additional_information: str | None = None
     merchant_category_code: str | None = None

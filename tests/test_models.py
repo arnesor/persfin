@@ -7,7 +7,30 @@ from persfin.schemas.schemas import (
     AccountRef,
     BankSession,
     SessionResponse,
+    Transaction,
 )
+
+# ── Transaction ───────────────────────────────────────────────────────────────
+
+
+class TestTransaction:
+    def test_retains_unknown_api_fields_including_amount_fields(self) -> None:
+        transaction = Transaction.model_validate(
+            {
+                "transaction_amount": {
+                    "amount": "10.00",
+                    "currency": "NOK",
+                    "exchange_rate": "1.0",
+                },
+                "bank_extension": {"reference": "extra"},
+            }
+        )
+
+        dumped = transaction.model_dump(mode="json")
+
+        assert dumped["bank_extension"] == {"reference": "extra"}
+        assert dumped["transaction_amount"]["exchange_rate"] == "1.0"
+
 
 # ── AccountRef.display_name ───────────────────────────────────────────────────
 
